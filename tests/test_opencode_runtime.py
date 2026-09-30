@@ -3,6 +3,7 @@ import unittest
 import asyncio
 import json
 import os
+from pathlib import Path
 from unittest.mock import patch
 
 import httpx
@@ -196,7 +197,8 @@ class OpenCodeRuntimeTests(unittest.IsolatedAsyncioTestCase):
             await session.close()
             await runtime.close()
         args, kwargs = captured[0]
-        self.assertEqual(args[:3], ("opencode", "--pure", "serve"))
+        self.assertEqual(Path(args[0]).stem, "opencode")
+        self.assertEqual(args[1:3], ("--pure", "serve"))
         self.assertTrue(kwargs["env"]["OPENCODE_SERVER_PASSWORD"])
         config = json.loads(kwargs["env"]["OPENCODE_CONFIG_CONTENT"])
         self.assertEqual(config["permission"], {"*": "deny"})
