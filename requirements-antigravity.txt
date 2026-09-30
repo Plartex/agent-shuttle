@@ -1,0 +1,2 @@
+# Optional SDK mode; install into .venv-agy, separate from the A2A runtime.
+google-antigravity==0.1.17

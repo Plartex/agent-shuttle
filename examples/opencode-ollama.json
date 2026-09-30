@@ -1,0 +1,13 @@
+{
+  "id": "opencode-local",
+  "runtime": "opencode",
+  "provider": "ollama",
+  "workspace": "..",
+  "endpoint": "http://127.0.0.1:11434",
+  "default_model": "qwen3.5:9b",
+  "allowed_models": ["qwen3.5:9b"],
+  "reasoning_efforts": ["none"],
+  "default_tool_policy": "no_tools",
+  "max_tool_policy": "read_only",
+  "turn_timeout_seconds": 120
+}

@@ -1,0 +1,19 @@
+image: python:3.12-slim
+
+stages:
+  - test
+
+test:
+  stage: test
+  before_script:
+    - python -m pip install --upgrade pip
+    - python -m pip install -e '.[test]'
+  script:
+    - python -m compileall -q agent_bridge
+    - python -m coverage run --branch --source=agent_bridge -m unittest discover -s tests -v
+    - python -m coverage report --fail-under=90
+  cache:
+    paths:
+      - .cache/pip
+  variables:
+    PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
