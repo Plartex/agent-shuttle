@@ -172,7 +172,7 @@ class ManagedHarnessTests(unittest.IsolatedAsyncioTestCase):
                  patch("agent_bridge.managed.asyncio.sleep", new_callable=AsyncMock):
                 async with connect_harness(launch, client=client):
                     argv = popen.call_args.args[0]
-                    self.assertEqual(Path(argv[argv.index("--profile") + 1]), profile)
+                    self.assertTrue(Path(argv[argv.index("--profile") + 1]).samefile(profile))
             process.terminate.assert_called_once()
 
     async def test_started_server_stops_after_caller_error(self):

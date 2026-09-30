@@ -47,7 +47,7 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(found["antigravity"], str(bundled))
 
     def test_antigravity_respects_command_environment_override(self):
-        command = "C:/manual/agy.exe"
+        command = str(Path.cwd() / "manual" / "agy")
         with patch.dict(os.environ, {"BRIDGE_AGY_COMMAND": command}), \
              patch("agent_bridge.discovery.shutil.which", return_value=None), \
              patch("agent_bridge.discovery._is_file", side_effect=lambda path: path == Path(command)), \

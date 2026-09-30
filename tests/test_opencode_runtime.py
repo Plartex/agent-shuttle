@@ -217,6 +217,7 @@ class OpenCodeConfigTests(unittest.TestCase):
             self.assertEqual(config["permission"], {"*": "allow"})
             self.assertNotIn("read-only", config["agent"]["bridge"]["prompt"])
 
+    @unittest.skipUnless(os.name == "nt", "Windows npm shim")
     def test_windows_npm_shim_resolves_real_executable(self):
         with tempfile.TemporaryDirectory() as folder:
             root = __import__("pathlib").Path(folder)
