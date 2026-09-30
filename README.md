@@ -192,6 +192,7 @@ Model parameters are passed as A2A metadata keys (`agent_bridge.model`, `agent_b
 - Every server binds to a strictly validated, canonical workspace directory.
 - `connect_harness()` verifies that an existing server's workspace matches the caller's target workspace before reusing it.
 - **Sessions:** `BridgeSession` maintains a stateful conversation across multiple `ask()` calls. Conversation settings (model, effort, tool policy) are pinned at session creation and cannot be changed mid-session. Idle sessions are cleaned up automatically after 30 minutes.
+- **Task lifecycle:** `ShuttleClient.submit()` returns a `TaskHandle` immediately. Use `status()`, bounded `wait(timeout)`, `events()`, `result()`, or `cancel()`; reopen a live task by ID with `client.task(url, task_id)`. A wait timeout does not stop the agent. An optional UUID `request_id` deduplicates retried submissions during the current server lifetime. Task state is currently in memory and does not survive a server restart. See the [API reference](docs/api.md#taskhandle-and-bridgeevent).
 
 ### Safety & Tool Policies
 Agent Shuttle defines four standardized tool policies:

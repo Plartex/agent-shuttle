@@ -14,7 +14,9 @@ Import public symbols directly from `agent_shuttle`:
 from agent_shuttle import (
     ShuttleClient,
     BridgeResult,
+    BridgeEvent,
     BridgeSession,
+    TaskHandle,
     HarnessLaunch,
     BridgeConnection,
     connect_harness,
@@ -29,7 +31,7 @@ from agent_shuttle import (
 
 ### `ShuttleClient`
 
-The primary client for querying and dispatching tasks to any A2A 1.x server.
+The primary client for querying Agent Shuttle and other task-capable A2A 1.x servers. `submit()` and `ask()` require the peer to return an A2A Task, not a message-only response.
 
 ```python
 client = ShuttleClient(timeout_seconds: float = 1800)
@@ -37,15 +39,25 @@ client = ShuttleClient(timeout_seconds: float = 1800)
 
 #### Methods
 
-- **`async def ask(peer_url: str, prompt: str, model: str | None = None, *, reasoning_effort: str | None = None, read_only: bool = False, tool_policy: str | None = None, session_id: str | None = None) -> BridgeResult`**  
-  Dispatches a text task to the A2A peer at `peer_url`.
+- **`async def ask(peer_url: str, prompt: str, model: str | None = None, *, reasoning_effort: str | None = None, read_only: bool = False, tool_policy: str | None = None, session_id: str | None = None, request_id: str | None = None) -> BridgeResult`**
+  Dispatches a text task and waits for its result. If the caller is cancelled or its overall timeout expires, it requests remote cancellation.
   - `prompt`: Non-empty text instruction.
   - `model`: Optional target model ID on the remote agent.
   - `reasoning_effort`: Optional provider-specific reasoning effort (e.g. `low`, `medium`, `high`, `none`).
   - `read_only`: Backward-compatible boolean flag for read-only tools.
   - `tool_policy`: One of `"no_tools"`, `"read_only"`, `"workspace_write"`, or `"full_access"`.
   - `session_id`: Optional UUID string identifying a persistent conversation.
+  - `request_id`: Optional UUID for deduplicating retries within one server lifetime. Reusing it with different arguments is an error.
   - Returns: `BridgeResult`.
+
+- **`async def submit(..., request_id: str | None = None) -> TaskHandle`**
+  Accepts the same task options as `ask()` and returns as soon as A2A creates the task. Unlike `ask()`, stopping the caller does not cancel the submitted task.
+
+- **`task(peer_url: str, task_id: str) -> TaskHandle`**
+  Reopens a task from its ID while the same server instance is running.
+
+- **`task_status(peer_url, task_id)` / `cancel_task(peer_url, task_id)`**
+  Fetch the current A2A task or request its cancellation.
 
 - **`def session(peer_url: str, model: str | None = None, *, reasoning_effort: str | None = None, read_only: bool = False, tool_policy: str | None = None) -> BridgeSession`**  
   Constructs a reusable, stateful `BridgeSession` bound to `peer_url` with pinned settings. Recommended usage is with `async with`.
@@ -64,6 +76,24 @@ client = ShuttleClient(timeout_seconds: float = 1800)
 
 - **`async def close_session(peer_url: str, session_id: str) -> bool`**  
   Explicitly closes an active session on the peer server.
+
+---
+
+### `TaskHandle` and `BridgeEvent`
+
+```python
+handle = await client.submit(url, "Inspect this project", request_id=my_uuid)
+print(handle.task_id)
+snapshot = await handle.wait(timeout=30)  # May still be WORKING; does not cancel.
+if snapshot.state == "TASK_STATE_WORKING":
+    handle = client.task(url, handle.task_id)  # Reopen from another client instance.
+    result = await handle.result()
+
+# To stop an active task explicitly:
+# cancelled = await handle.cancel()
+```
+
+`status()` returns a `BridgeResult` snapshot. `wait(timeout)` returns the latest snapshot when the wait budget expires; `result()` waits until a terminal or input-required state. `events()` yields live `BridgeEvent(kind, task_id, state, text)` updates; after a stream disconnect, call `status()` to recover the authoritative state. Repeated `cancel()` calls on a cancelled task return its cancelled status. A task store is currently **in memory**: IDs and deduplication bindings do not survive a server restart. Cancellation of a persistent turn closes that native session; create a new session rather than silently continuing a potentially inconsistent one.
 
 ---
 

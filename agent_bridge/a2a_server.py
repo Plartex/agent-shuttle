@@ -17,7 +17,7 @@ from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.routes import create_agent_card_routes, create_jsonrpc_routes
 from a2a.server.tasks import InMemoryTaskStore, TaskUpdater
 from a2a.types import AgentCapabilities, AgentCard, AgentInterface, AgentSkill, TaskState
-from a2a.utils.errors import TaskNotCancelableError
+from a2a.utils.errors import InvalidParamsError
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Route
@@ -47,6 +47,7 @@ class SessionManager:
         self.backend = backend
         self.idle_seconds = idle_seconds
         self.sessions: dict[str, _SessionRecord] = {}
+        self.cancelled_sessions: set[str] = set()
         self.lock = asyncio.Lock()
 
     async def run(
@@ -60,6 +61,8 @@ class SessionManager:
     ) -> str | BackendResponse:
         settings = (model, reasoning_effort, read_only, tool_policy)
         async with self.lock:
+            if session_id in self.cancelled_sessions:
+                raise RuntimeError("Session was closed after cancellation; start a new session")
             record = self.sessions.get(session_id)
             if record is None:
                 kwargs = {"reasoning_effort": reasoning_effort, "read_only": read_only}
@@ -77,6 +80,15 @@ class SessionManager:
             record.last_used = monotonic()
             try:
                 return await record.backend.ask(prompt)
+            except asyncio.CancelledError:
+                # The provider may have performed side effects before its turn
+                # was interrupted. Never continue that same native conversation.
+                record.closed = True
+                self.cancelled_sessions.add(session_id)
+                try:
+                    await record.backend.close()
+                finally:
+                    raise
             finally:
                 record.last_used = monotonic()
 
@@ -86,8 +98,9 @@ class SessionManager:
         if record is None:
             return False
         async with record.lock:
-            record.closed = True
-            await record.backend.close()
+            if not record.closed:
+                record.closed = True
+                await record.backend.close()
         return True
 
     async def reap_idle(self) -> None:
@@ -101,8 +114,9 @@ class SessionManager:
                 self.sessions.pop(session_id)
         for _, record in expired:
             async with record.lock:
-                record.closed = True
-                await record.backend.close()
+                if not record.closed:
+                    record.closed = True
+                    await record.backend.close()
 
     async def close_all(self) -> None:
         async with self.lock:
@@ -232,8 +246,46 @@ class BridgeExecutor(AgentExecutor):
         await updater.update_status(TaskState.TASK_STATE_COMPLETED)
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
-        # One-shot backend calls cannot currently be cancelled safely via A2A.
-        raise TaskNotCancelableError()
+        # The A2A active-task manager cancels and joins the producer after this
+        # hook returns. Backend coroutines own their native cleanup on
+        # CancelledError; a terminal CANCELED state is written only after the
+        # producer has finished winding down.
+        return None
+
+
+class _IdempotentRequestHandler(DefaultRequestHandler):
+    """Deduplicate explicitly keyed submissions within this server lifetime."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._request_lock = asyncio.Lock()
+        self._requests: dict[str, tuple[bytes, asyncio.Task]] = {}
+
+    async def on_message_send(self, params, context):
+        request_id = (
+            params.message.metadata["agent_bridge.request_id"]
+            if "agent_bridge.request_id" in params.message.metadata else None
+        )
+        if request_id is None:
+            return await super().on_message_send(params, context)
+        try:
+            request_id = str(uuid.UUID(request_id))
+        except (TypeError, ValueError, AttributeError):
+            raise InvalidParamsError("agent_bridge.request_id must be a UUID") from None
+        if params.message.message_id != request_id:
+            raise InvalidParamsError("message_id must match agent_bridge.request_id")
+        fingerprint = params.SerializeToString(deterministic=True)
+        async with self._request_lock:
+            previous = self._requests.get(request_id)
+            if previous is not None:
+                if previous[0] != fingerprint:
+                    raise InvalidParamsError("request_id is already bound to another request")
+                submitted = previous[1]
+            else:
+                submitted = asyncio.create_task(super().on_message_send(params, context))
+                self._requests[request_id] = (fingerprint, submitted)
+        # A dropped HTTP caller must not abort the only copy of its task.
+        return await asyncio.shield(submitted)
 
 
 def make_app(name: str, backend: Backend, url: str, info_provider: InfoProvider | None = None) -> Starlette:
@@ -259,11 +311,11 @@ def make_app(name: str, backend: Backend, url: str, info_provider: InfoProvider 
         version="0.1.0",
         default_input_modes=["text/plain"],
         default_output_modes=["text/plain"],
-        capabilities=AgentCapabilities(streaming=False, push_notifications=False),
+        capabilities=AgentCapabilities(streaming=True, push_notifications=False),
         supported_interfaces=[AgentInterface(protocol_binding="JSONRPC", url=url, protocol_version="1.0")],
         skills=[skill],
     )
-    handler = DefaultRequestHandler(
+    handler = _IdempotentRequestHandler(
         agent_executor=BridgeExecutor(backend, sessions),
         task_store=InMemoryTaskStore(),
         agent_card=card,

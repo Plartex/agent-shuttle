@@ -14,7 +14,9 @@
 from agent_shuttle import (
     ShuttleClient,
     BridgeResult,
+    BridgeEvent,
     BridgeSession,
+    TaskHandle,
     HarnessLaunch,
     BridgeConnection,
     connect_harness,
@@ -29,7 +31,7 @@ from agent_shuttle import (
 
 ### `ShuttleClient`
 
-Основной клиент для взаимодействия и отправки задач любому серверу A2A 1.x.
+Основной клиент Agent Shuttle и других серверов A2A 1.x, поддерживающих задачи. Для `submit()` и `ask()` сервер должен возвращать A2A Task, а не только сообщение.
 
 ```python
 client = ShuttleClient(timeout_seconds: float = 1800)
@@ -37,15 +39,25 @@ client = ShuttleClient(timeout_seconds: float = 1800)
 
 #### Методы
 
-- **`async def ask(peer_url: str, prompt: str, model: str | None = None, *, reasoning_effort: str | None = None, read_only: bool = False, tool_policy: str | None = None, session_id: str | None = None) -> BridgeResult`**  
-  Отправляет текстовую инструкцию агенту A2A по адресу `peer_url`.
+- **`async def ask(peer_url: str, prompt: str, model: str | None = None, *, reasoning_effort: str | None = None, read_only: bool = False, tool_policy: str | None = None, session_id: str | None = None, request_id: str | None = None) -> BridgeResult`**
+  Отправляет задачу и ждёт результат. При отмене вызывающего кода или истечении общего тайм-аута запрашивает удалённую отмену.
   - `prompt`: Непустая строка с задачей.
   - `model`: Идентификатор целевой модели агента.
   - `reasoning_effort`: Уровень рассуждений (например, `low`, `medium`, `high`, `none`).
   - `read_only`: Устаревший булев флаг только для чтения (сохранен для совместимости).
   - `tool_policy`: Политика инструментов: `"no_tools"`, `"read_only"`, `"workspace_write"` или `"full_access"`.
   - `session_id`: Идентификатор UUID для продолжения существующей сессии.
+  - `request_id`: Необязательный UUID для защиты повторной отправки в течение жизни сервера. Повтор с другими аргументами отклоняется.
   - Возвращает: `BridgeResult`.
+
+- **`async def submit(..., request_id: str | None = None) -> TaskHandle`**
+  Принимает те же настройки, что `ask()`, и возвращается сразу после создания задачи A2A. Прекращение ожидания вызывающим кодом не отменяет отправленную задачу.
+
+- **`task(peer_url: str, task_id: str) -> TaskHandle`**
+  Восстанавливает доступ к задаче по ID, пока работает тот же экземпляр сервера.
+
+- **`task_status(peer_url, task_id)` / `cancel_task(peer_url, task_id)`**
+  Получают текущее состояние задачи A2A или запрашивают её отмену.
 
 - **`def session(peer_url: str, model: str | None = None, *, reasoning_effort: str | None = None, read_only: bool = False, tool_policy: str | None = None) -> BridgeSession`**  
   Создает объект контекстного менеджера `BridgeSession` с зафиксированными настройками. Рекомендуется использовать с `async with`.
@@ -64,6 +76,24 @@ client = ShuttleClient(timeout_seconds: float = 1800)
 
 - **`async def close_session(peer_url: str, session_id: str) -> bool`**  
   Явно закрывает сессию на сервере и освобождает ресурсы.
+
+---
+
+### `TaskHandle` и `BridgeEvent`
+
+```python
+handle = await client.submit(url, "Проверь проект", request_id=my_uuid)
+print(handle.task_id)
+snapshot = await handle.wait(timeout=30)  # Задача может ещё работать; это не отмена.
+if snapshot.state == "TASK_STATE_WORKING":
+    handle = client.task(url, handle.task_id)
+    result = await handle.result()
+
+# Явная остановка активной задачи:
+# cancelled = await handle.cancel()
+```
+
+`status()` возвращает снимок `BridgeResult`. Если срок `wait(timeout)` истёк, метод возвращает последний снимок; `result()` ждёт терминального состояния или запроса ввода. `events()` выдаёт живые события `BridgeEvent(kind, task_id, state, text)`; после обрыва потока вызовите `status()` для получения достоверного состояния. Повторный `cancel()` уже отменённой задачи возвращает её статус. Сейчас задачи хранятся **в памяти**: ID и привязки `request_id` не переживают перезапуск сервера. Отмена шага постоянной сессии закрывает её нативную сессию; для продолжения создайте новую.
 
 ---
 

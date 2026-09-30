@@ -1,7 +1,7 @@
 """Local A2A bridge for configured agent runtimes."""
 
 from .backends import AntigravityAuthenticationError, AntigravityPermissionDenied
-from .client import BridgeClient, BridgeResult, BridgeSession
+from .client import BridgeClient, BridgeEvent, BridgeResult, BridgeSession, TaskHandle
 from .discovery import discover_harnesses
 from .managed import BridgeConnection, HarnessLaunch, connect_harness
 from .profiles import AgentProfile, ToolPolicy
@@ -12,7 +12,9 @@ __all__ = [
     "AntigravityPermissionDenied",
     "AntigravityAuthenticationError",
     "BridgeResult",
+    "BridgeEvent",
     "BridgeSession",
+    "TaskHandle",
     "discover_harnesses",
     "BridgeConnection",
     "HarnessLaunch",
