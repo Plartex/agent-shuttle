@@ -31,6 +31,19 @@ class ScopedAgyPolicyTests(unittest.TestCase):
             with self.subTest(tool=tool):
                 self.assertEqual(self.decision("read_only", tool, **{key: str(path)}), "allow")
 
+    def test_workspace_alias_resolves_to_same_project(self):
+        alias = self.root.parent / "project-alias"
+        try:
+            alias.symlink_to(self.root, target_is_directory=True)
+        except OSError:
+            self.skipTest("directory symlinks are unavailable")
+        self.assertEqual(evaluate_tool_call("read_only", alias, {
+            "name": "view_file", "args": {"AbsolutePath": str(alias / "example.py")},
+        })["decision"], "allow")
+        self.assertEqual(evaluate_tool_call("workspace_write", alias, {
+            "name": "write_to_file", "args": {"TargetFile": str(alias / "example.py")},
+        })["decision"], "allow")
+
     def test_default_deny_covers_writes_commands_mcp_and_subagents(self):
         for policy in ("no_tools", "read_only"):
             for tool in ("write_to_file", "replace_file_content", "run_command",

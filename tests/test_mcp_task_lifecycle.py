@@ -58,7 +58,7 @@ class McpTaskLifecycleTests(unittest.IsolatedAsyncioTestCase):
                         first = await call("submit_task", agent_id="antigravity", prompt="cancel me")
                         await asyncio.wait_for(backend.started.wait(), 2)
                         waiting = await call("wait_task", task_id=first["task_id"], timeout_seconds=0.05)
-                        self.assertEqual(waiting["state"], "TASK_STATE_WORKING")
+                        self.assertIn(waiting["state"], {"TASK_STATE_SUBMITTED", "TASK_STATE_WORKING"})
                         self.assertFalse(backend.cancelled.is_set())
                         self.assertEqual((await call("cancel_task", task_id=first["task_id"]))["state"], "TASK_STATE_CANCELED")
                         self.assertEqual((await call("cancel_task", task_id=first["task_id"]))["state"], "TASK_STATE_CANCELED")

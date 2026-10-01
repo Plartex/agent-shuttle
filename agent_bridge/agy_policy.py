@@ -43,8 +43,13 @@ def evaluate_tool_call(policy: str, workspace: Path, call: object) -> dict:
     if not isinstance(raw, str) or not raw or not Path(raw).is_absolute():
         return denied
     try:
+        # Keep the caller's path spelling for lexical containment. Windows
+        # runner temp directories may resolve through a drive junction, so
+        # comparing an unresolved child against a resolved root denies valid
+        # files. Resolve both paths separately for the actual containment.
+        lexical_root = Path(os.path.abspath(workspace))
+        lexical = Path(raw).relative_to(lexical_root)
         root = workspace.resolve(strict=True)
-        lexical = Path(raw).relative_to(root)
         target = Path(raw).resolve()
         relative = target.relative_to(root)
         if writing and (
