@@ -59,34 +59,17 @@ pip install C:\path\to\agent-shuttle
 
 ## Быстрый старт (Windows PowerShell)
 
-Для автономной разработки и тестирования внутри этого репозитория:
+Для разработки из чекаута достаточно стандартной установки Python-пакета:
 
-1. **Инициализация окружения:**
-   ```powershell
-   & .\Install-Shuttle.ps1
-   ```
-   *(Если Python 3.11+ не добавлен в `PATH`, предварительно задайте `$env:BRIDGE_BOOTSTRAP_PYTHON = 'C:\path\to\python.exe'`).*
+```powershell
+python -m venv .venv
+& .\.venv\Scripts\python.exe -m pip install -e .
+& .\.venv\Scripts\agent-shuttle.exe discover
+```
 
-2. **Генерация конфигураций MCP:**
-   ```powershell
-   & .\Configure-Shuttle-Mcp.ps1
-   ```
-   Скрипт создаст файлы `.codex/config.toml` и `.agents/mcp_config.json` с абсолютными путями к Python-окружению.
+В конфигурации MCP-клиента укажите абсолютный путь к установленному `.venv\Scripts\agent-shuttle-mcp.exe`. При запросе MCP сам запускает локальный A2A-сервер, если тот не работает. Пример настройки есть в [руководстве](docs/ru/getting-started.md).
 
-3. **Запуск стандартных серверов Codex и Antigravity:**
-   ```powershell
-   & .\Start-Shuttle.ps1
-   ```
-   Скрипт запустит фоновые серверы на портах loopback:
-   - Codex: `http://127.0.0.1:8765` (agent card: `http://127.0.0.1:8765/.well-known/agent-card.json`)
-   - Antigravity: `http://127.0.0.1:8766` (agent card: `http://127.0.0.1:8766/.well-known/agent-card.json`)
-
-4. **Остановка фоновых серверов:**
-   ```powershell
-   & .\Stop-Shuttle.ps1
-   ```
-
-Логи выполнения и PID-файлы сохраняются в каталоге `.runtime/` и исключены из Git.
+Если нужен постоянный сервер, запустите `agent-shuttle serve codex --workspace . --port 8765` (или `serve antigravity` на порту 8766) в терминале и остановите его сочетанием Ctrl+C.
 
 ---
 

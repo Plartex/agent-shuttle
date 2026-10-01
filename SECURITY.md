@@ -40,7 +40,7 @@ The `full_access` policy (and `--agy-dangerously-skip-permissions` for Antigravi
 
 - **No Secrets in Profiles:** Do not hardcode API keys, passwords, or authentication tokens into `profile.json` files. Use the `credential_env` field to reference environment variables.
 - **Loopback Ollama Restriction:** Agent Shuttle enforces that Ollama endpoints must use local HTTP loopback (`127.0.0.1`, `localhost`, `::1`). Remote unauthenticated Ollama endpoints are rejected.
-- **Runtime Logs:** Inspect `.runtime/*.log` before sharing diagnostic files; prompts, responses, and stack traces may contain private source code or environment variables.
+- **Runtime Logs:** Inspect diagnostic logs before sharing them; prompts, responses, and stack traces may contain private source code or environment variables.
 
 ---
 

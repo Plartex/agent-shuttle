@@ -4,7 +4,7 @@
 
 ## 1. Автозапуск A2A-сервера через MCP
 
-Не запускайте `Start-Shuttle.ps1` или `agent-shuttle serve`. В чате Antigravity попросите вызвать инструмент MCP `ask_codex` сервера `agent-shuttle`:
+Отдельно запускать `agent-shuttle serve` не нужно. В чате Antigravity попросите вызвать инструмент MCP `ask_codex` сервера `agent-shuttle`:
 
 ```text
 prompt: Прочитай pyproject.toml в этом проекте. Верни только название пакета и версию. Файлы не меняй.

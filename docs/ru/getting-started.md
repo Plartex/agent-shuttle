@@ -35,22 +35,18 @@ Agent Shuttle взаимодействует с локальными агент�
 git clone https://github.com/Plartex/agent-shuttle.git
 Set-Location agent-shuttle
 
-# 2. Инициализация виртуального окружения и установка зависимостей
-& .\Install-Shuttle.ps1
+# 2. Установка Python-пакета в отдельное окружение
+python -m venv .venv
+& .\.venv\Scripts\python.exe -m pip install -e .
 
-# 3. Создание конфигураций MCP для Codex и Antigravity
-& .\Configure-Shuttle-Mcp.ps1
+# 3. Укажите MCP-клиенту абсолютный путь к
+#    .venv\Scripts\agent-shuttle-mcp.exe
 
 # 4. Откройте MCP-клиент и вызовите ask_codex или ask_antigravity.
 # При необходимости A2A-сервер запустится автоматически на время запроса.
 ```
 
-Если вы также запускаете постоянные серверы вручную, остановите их так:
-```powershell
-& .\Stop-Shuttle.ps1
-```
-
-Логи и PID-файлы постоянных серверов сохраняются в каталоге `.runtime/` (`codex.out.log`, `codex.err.log`, `antigravity.out.log`, `antigravity.err.log`).
+Antigravity Desktop может читать `%USERPROFILE%\.gemini\config\mcp_config.json` вместо локальной конфигурации MCP в чекауте. Если нужен постоянный A2A-сервер, запустите команду `agent-shuttle serve` ниже и остановите её сочетанием Ctrl+C.
 
 ---
 
@@ -179,22 +175,19 @@ asyncio.run(main())
 ```
 
 ### Через Model Context Protocol (MCP)
-Добавьте Agent Shuttle в конфигурацию MCP вашего клиентского агента (например, в `.codex/config.toml` для Codex или `.agents/mcp_config.json` для Antigravity).
+Добавьте Agent Shuttle в конфигурацию MCP-клиента. Для Antigravity Desktop проверьте `%USERPROFILE%\.gemini\config\mcp_config.json`: файл `.agents/mcp_config.json` в чекауте может не быть активной конфигурацией.
 
 Пример конфигурации:
 ```toml
 [mcp_servers.agent_shuttle]
-command = "C:/path/to/project/.venv/Scripts/python.exe"
-args = ["-m", "agent_shuttle.mcp_server"]
+command = "C:/path/to/agent-shuttle/.venv/Scripts/agent-shuttle-mcp.exe"
 tool_timeout_sec = 1800
 
 [mcp_servers.agent_shuttle.env]
-BRIDGE_CODEX_URL = "http://127.0.0.1:8765"
-BRIDGE_ANTIGRAVITY_URL = "http://127.0.0.1:8766"
 BRIDGE_WORKSPACE = "C:/path/to/project"
 ```
 
-Для MCP-запросов отдельно запускать `agent-shuttle serve` не нужно: при отсутствии подходящего сервера Agent Shuttle временно запускает его на время вызова. `BRIDGE_WORKSPACE` задаёт проверяемый проект.
+Пример TOML подходит клиенту, который читает секции `mcp_servers`. Для клиента с JSON используйте те же значения `command` и `env` в его формате. Для MCP-запросов отдельно запускать `agent-shuttle serve` не нужно: при отсутствии подходящего сервера Agent Shuttle временно запускает его на время вызова. `BRIDGE_WORKSPACE` задаёт проверяемый проект.
 
 После этого инструменты можно вызывать прямо в диалоге с агентом:
 ```text

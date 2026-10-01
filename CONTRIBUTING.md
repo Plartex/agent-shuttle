@@ -8,15 +8,16 @@ Thank you for contributing to Agent Shuttle. This project maintains a modular, l
 
 ## Development Setup
 
-1. **Virtual Environment Setup (Windows):**
+1. **Virtual Environment Setup:**
    ```powershell
-   & .\Install.ps1
+   python -m venv .venv
+   & .\.venv\Scripts\python.exe -m pip install -e ".[test]"
    ```
-   This creates `.venv` and installs the package in editable mode (`pip install -e .`).
+   On Linux or macOS, use `.venv/bin/python` in place of `.venv\Scripts\python.exe`.
 
 2. **Clean Repository Hygiene:**
    - Keep account credentials, personal API keys, and local binary executables out of Git.
-   - Generated configuration files (`.codex/config.toml`, `.agents/mcp_config.json`) and runtime artifacts (`.runtime/`) are ignored by `.gitignore` and must never be committed.
+   - Local configuration files (`.codex/config.toml`, `.agents/mcp_config.json`) and runtime artifacts (`.runtime/`) are ignored by `.gitignore` and must never be committed.
 
 ---
 

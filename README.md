@@ -59,34 +59,17 @@ Once installed, the CLI tools (`agent-shuttle`, `agent-shuttle-mcp`) and Python 
 
 ## Quickstart (Windows PowerShell)
 
-For standalone development and testing inside this repository:
+Use standard Python packaging, including when developing from a checkout:
 
-1. **Bootstrap dependencies:**
-   ```powershell
-   & .\Install-Shuttle.ps1
-   ```
-   *(If Python 3.11+ is not on `PATH`, set `$env:BRIDGE_BOOTSTRAP_PYTHON = 'C:\path\to\python.exe'` beforehand).*
+```powershell
+python -m venv .venv
+& .\.venv\Scripts\python.exe -m pip install -e .
+& .\.venv\Scripts\agent-shuttle.exe discover
+```
 
-2. **Generate MCP configuration files:**
-   ```powershell
-   & .\Configure-Shuttle-Mcp.ps1
-   ```
-   This creates `.codex/config.toml` and `.agents/mcp_config.json` with absolute paths to the environment.
+Point your MCP client's `command` at the installed `.venv\Scripts\agent-shuttle-mcp.exe` (use its absolute path). MCP starts a local A2A peer when a request needs one; there is no separate server startup step. See the [getting started guide](docs/getting-started.md) for MCP configuration.
 
-3. **Start default Codex and Antigravity bridge servers:**
-   ```powershell
-   & .\Start-Shuttle.ps1
-   ```
-   This starts background servers on loopback ports:
-   - Codex: `http://127.0.0.1:8765` (agent card: `http://127.0.0.1:8765/.well-known/agent-card.json`)
-   - Antigravity: `http://127.0.0.1:8766` (agent card: `http://127.0.0.1:8766/.well-known/agent-card.json`)
-
-4. **Stop background servers:**
-   ```powershell
-   & .\Stop-Shuttle.ps1
-   ```
-
-Runtime logs and process ID files are stored in `.runtime/` and ignored by version control.
+For a persistent server, run `agent-shuttle serve codex --workspace . --port 8765` (or `serve antigravity` on port 8766) in a terminal and stop it with Ctrl+C.
 
 ---
 

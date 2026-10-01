@@ -23,13 +23,13 @@ Invoke-RestMethod http://127.0.0.1:8766/bridge/identity
 - **If `/bridge/identity` returns 404:**  
   The running server is an older Bridge version. Stop the process and restart it with the current release.
 - **If `/bridge/identity` times out or fails to connect:**  
-  The Bridge process is either dead, blocked by a local firewall, or has hung. Inspect `.runtime/antigravity.err.log` and verify the process ID in `.runtime/antigravity.pid`.
+  A persistent Bridge process may be stopped, blocked by a local firewall, or hung. Inspect the terminal where you ran `agent-shuttle serve antigravity --workspace . --port 8766`. If you use MCP without a persistent server, no listener is expected between requests.
 
 ---
 
 ### Authentication belongs to the CLI process, not the desktop app
 
-`AntigravityAuthenticationError` means `agy` could not use its account in the context where Bridge launched it. If the diagnostic mentions `Access is denied` under `.gemini/antigravity-cli`, a restricted or sandboxed launcher is a likely cause; it does **not** prove that the user is signed out. Check with `agy models` in an ordinary terminal under the same Windows account. If that succeeds, start `Start-Bridge.ps1` from that terminal rather than from a sandboxed executor, and retry the task. If it also fails, start `agy` interactively and complete its sign-in flow. Do not copy credentials into the project or disable sandboxing globally.
+`AntigravityAuthenticationError` means `agy` could not use its account in the context where Bridge launched it. If the diagnostic mentions `Access is denied` under `.gemini/antigravity-cli`, a restricted or sandboxed launcher is a likely cause; it does **not** prove that the user is signed out. Check with `agy models` in an ordinary terminal under the same Windows account. If that succeeds, run `agent-shuttle serve antigravity --workspace . --port 8766` from that terminal rather than from a sandboxed executor, and retry the task. If it also fails, start `agy` interactively and complete its sign-in flow. Do not copy credentials into the project or disable sandboxing globally.
 
 ---
 
@@ -163,9 +163,5 @@ On Windows, child processes spawned by venvs or shell wrappers may remain orphan
 
 - **Automated Process Cleanup:**  
   When using `connect_harness`, Agent Shuttle terminates the entire process tree using `taskkill /PID <pid> /T /F` on Windows before removing temporary directories.
-- **Manual Cleanup via Script:**  
-  ```powershell
-  & .\Stop-Bridge.ps1
-  ```
-- **Clearing Stale PID Files:**  
-  If a server was killed outside PowerShell, delete orphaned `.pid` files in the `.runtime/` folder.
+- **Persistent Servers:**
+  Stop a foreground `agent-shuttle serve` process with Ctrl+C. If it was launched by another process manager, stop it through that manager after confirming its identity.
