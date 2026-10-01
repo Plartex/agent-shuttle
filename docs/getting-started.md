@@ -41,16 +41,16 @@ Set-Location agent-shuttle
 # 3. Generate MCP configurations for Codex and Antigravity
 & .\Configure-Shuttle-Mcp.ps1
 
-# 4. Start background servers for Codex (8765) and Antigravity (8766)
-& .\Start-Shuttle.ps1
+# 4. Open your MCP client and call ask_codex or ask_antigravity.
+# The A2A server starts automatically for each request if needed.
 ```
 
-To stop background servers:
+If you also start persistent servers manually, stop them with:
 ```powershell
 & .\Stop-Shuttle.ps1
 ```
 
-Logs and process identifiers are written to `.runtime/` (`codex.out.log`, `codex.err.log`, `antigravity.out.log`, `antigravity.err.log`).
+Persistent server logs and process identifiers are written to `.runtime/` (`codex.out.log`, `codex.err.log`, `antigravity.out.log`, `antigravity.err.log`).
 
 ---
 
@@ -191,8 +191,10 @@ tool_timeout_sec = 1800
 [mcp_servers.agent_shuttle.env]
 BRIDGE_CODEX_URL = "http://127.0.0.1:8765"
 BRIDGE_ANTIGRAVITY_URL = "http://127.0.0.1:8766"
-BRIDGE_ANTIGRAVITY_WORKSPACE = "C:/path/to/project"
+BRIDGE_WORKSPACE = "C:/path/to/project"
 ```
+
+No separate `agent-shuttle serve` command is needed for MCP requests. If you keep the optional fixed URLs below, a matching running server is reused; otherwise Agent Shuttle starts a temporary server for the request. Set `BRIDGE_WORKSPACE` to the project you want the agent to inspect.
 
 Then invoke tools in your agent chats:
 ```text

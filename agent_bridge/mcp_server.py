@@ -7,6 +7,7 @@ import json
 import re
 import socket
 import sys
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -26,42 +27,17 @@ def _debug(stage: str) -> None:
 mcp = FastMCP(
     "Agent Shuttle",
     instructions=(
-        "Use ask_agent for configured OpenCode, Claude Code, or other agent profiles. "
+        "Use ask_agent for Codex, Antigravity, OpenCode, Claude Code, or configured profiles. "
         "The legacy ask_antigravity and ask_codex tools remain available. "
         "Use get_antigravity_info or get_codex_info to check current models, efforts and account quotas. "
-        "Each call starts a new remote task. When the user names a model for the remote agent, "
-        "pass that model ID exactly in the optional model parameter. When the user names a "
-        "reasoning effort, pass it exactly in reasoning_effort. "
+        "Each call starts a new remote task. Omit model unless the user explicitly names "
+        "a model for the remote agent; never copy the caller's model or a configured "
+        "selected_model into this parameter. When the user names a remote model, "
+        "pass that model ID exactly. When the user names a reasoning effort, "
+        "pass it exactly in reasoning_effort. "
         "Return the remote result to the user."
     ),
 )
-
-
-async def _ask(
-    env_name: str,
-    prompt: str,
-    model: str | None = None,
-    reasoning_effort: str | None = None,
-    tool_policy: str | None = None,
-) -> dict:
-    url = os.environ.get(env_name)
-    if not url:
-        raise RuntimeError(f"Set {env_name} to the local A2A server URL")
-    result = await BridgeClient().ask(
-        url,
-        prompt,
-        model=model,
-        reasoning_effort=reasoning_effort,
-        tool_policy=tool_policy,
-    )
-    return {
-        "task_id": result.task_id,
-        "context_id": result.context_id,
-        "state": result.state,
-        "text": result.text,
-        "usage": result.usage,
-        "details": result.details,
-    }
 
 
 def _free_local_url() -> str:
@@ -71,54 +47,106 @@ def _free_local_url() -> str:
         return f"http://127.0.0.1:{listener.getsockname()[1]}"
 
 
-async def _managed_antigravity(
-    prompt: str, workspace: str, model: str | None,
-    reasoning_effort: str | None, tool_policy: str | None,
-    turn_timeout_seconds: float,
-) -> dict:
-    root = Path(workspace).resolve(strict=True)
+def _workspace(value: str | None) -> Path:
+    root = Path(value or os.environ.get("BRIDGE_WORKSPACE") or os.getcwd()).resolve(strict=True)
     if not root.is_dir():
         raise ValueError("workspace must be a directory")
-    launch = HarnessLaunch(
-        "antigravity", _free_local_url(), root,
-        model=model, tool_policy=tool_policy,
-        agy_turn_timeout_seconds=turn_timeout_seconds,
-    )
-    _debug("antigravity: starting temporary bridge")
-    async with connect_harness(launch) as peer:
-        _debug("antigravity: bridge ready, sending task")
-        result = await BridgeClient().ask(
-            peer.url, prompt, model=model, reasoning_effort=reasoning_effort,
-            tool_policy=tool_policy,
-        )
-        _debug(f"antigravity: task returned {result.state}")
-    _debug("antigravity: temporary bridge stopped")
-    return {
-        "task_id": result.task_id, "context_id": result.context_id,
-        "state": result.state, "text": result.text,
-        "usage": result.usage, "details": result.details,
-    }
+    return root
 
 
-def _agent_url(agent_id: str) -> str:
-    if not re.fullmatch(r"[A-Za-z0-9_-]+", agent_id):
-        raise ValueError("agent_id must contain only letters, digits, hyphen, or underscore")
-    configured = os.environ.get("BRIDGE_AGENTS_JSON", "{}")
+def _local_url(url: str) -> str:
+    parsed = urlparse(url)
+    if (parsed.scheme != "http" or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
+            or parsed.port is None or parsed.path not in {"", "/"} or parsed.query or parsed.fragment):
+        raise ValueError("Agent URL must be a local HTTP loopback host and port")
+    return url.rstrip("/")
+
+
+def _agent_mapping() -> dict:
     try:
-        mapping = json.loads(configured)
+        mapping = json.loads(os.environ.get("BRIDGE_AGENTS_JSON", "{}"))
     except json.JSONDecodeError as exc:
         raise ValueError("BRIDGE_AGENTS_JSON must be a JSON object") from exc
     if not isinstance(mapping, dict):
         raise ValueError("BRIDGE_AGENTS_JSON must be a JSON object")
-    url = mapping.get(agent_id)
-    if url is None:
-        raise ValueError(f"Unknown agent profile {agent_id!r} in BRIDGE_AGENTS_JSON")
-    if not isinstance(url, str):
-        raise ValueError("Agent URL must be a string")
-    parsed = urlparse(url)
-    if parsed.scheme != "http" or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
-        raise ValueError("Agent URL must use local HTTP loopback")
-    return url.rstrip("/")
+    return mapping
+
+
+def _legacy_custom_url(agent_id: str) -> str | None:
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", agent_id):
+        raise ValueError("agent_id must contain only letters, digits, hyphen, or underscore")
+    entry = _agent_mapping().get(agent_id)
+    if agent_id not in {"codex", "antigravity", "opencode", "claude_code"} and isinstance(entry, str):
+        return _local_url(entry)
+    return None
+
+
+def _agent_launch(agent_id: str, workspace: str | None = None,
+                  model: str | None = None, tool_policy: str | None = None,
+                  turn_timeout_seconds: float = 300) -> HarnessLaunch:
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", agent_id):
+        raise ValueError("agent_id must contain only letters, digits, hyphen, or underscore")
+    mapping = _agent_mapping()
+    entry = mapping.get(agent_id, {})
+    if isinstance(entry, str):
+        entry = {"url": entry}
+    if not isinstance(entry, dict):
+        raise ValueError("Agent configuration must be an object or local URL")
+    name = entry.get("harness", agent_id)
+    if name not in {"codex", "antigravity", "opencode", "claude_code"}:
+        raise ValueError(f"Configure harness for agent profile {agent_id!r} in BRIDGE_AGENTS_JSON")
+    default_url = os.environ.get(f"BRIDGE_{name.upper()}_URL") if agent_id == name else None
+    url = _local_url(entry.get("url") or default_url or _free_local_url())
+    root = _workspace(workspace or entry.get("workspace") or os.environ.get(f"BRIDGE_{name.upper()}_WORKSPACE"))
+    profile = entry.get("profile")
+    if profile is not None and (not isinstance(profile, str) or not profile):
+        raise ValueError("Agent profile must be a nonempty path")
+    return HarnessLaunch(
+        name, url, root, model=model,
+        profile_path=Path(profile) if profile else None,
+        tool_policy=tool_policy,
+        agy_turn_timeout_seconds=turn_timeout_seconds,
+    )
+
+
+async def _managed_ask(launch: HarnessLaunch, prompt: str,
+                       model: str | None, reasoning_effort: str | None,
+                       tool_policy: str | None) -> dict:
+    async def send(url: str) -> dict:
+        result = await BridgeClient().ask(
+            url, prompt, model=model, reasoning_effort=reasoning_effort,
+            tool_policy=tool_policy,
+        )
+        _debug(f"{launch.name}: task returned {result.state}")
+        return {
+            "task_id": result.task_id, "context_id": result.context_id,
+            "state": result.state, "text": result.text,
+            "usage": result.usage, "details": result.details,
+        }
+
+    async with connect_harness(launch) as peer:
+        if launch.name == "codex" and model and not getattr(peer, "started", True):
+            try:
+                capabilities = await BridgeClient().capabilities(peer.url)
+                listed = {
+                    item.get("id") for item in capabilities.get("capabilities", {}).get("models", [])
+                    if isinstance(item, dict)
+                }
+            except Exception as exc:
+                _debug(f"codex: existing model catalog unavailable ({type(exc).__name__})")
+                listed = set()
+                capabilities = {}
+            if model not in listed:
+                _debug(f"codex: {model} absent from existing server catalog; starting isolated peer")
+                alternate = replace(
+                    launch, url=_free_local_url(),
+                    tool_policy="read_only" if capabilities.get("read_only_tools") is True
+                    else launch.tool_policy,
+                )
+                async with connect_harness(alternate) as fresh:
+                    return await send(fresh.url)
+        _debug(f"{launch.name}: bridge ready, sending task")
+        return await send(peer.url)
 
 
 @mcp.tool()
@@ -128,23 +156,32 @@ async def ask_agent(
     model: str | None = None,
     reasoning_effort: str | None = None,
     tool_policy: str | None = None,
+    workspace: str | None = None,
 ) -> dict:
-    """Ask a configured agent profile from BRIDGE_AGENTS_JSON."""
-    result = await BridgeClient().ask(
-        _agent_url(agent_id), prompt, model=model,
-        reasoning_effort=reasoning_effort, tool_policy=tool_policy,
-    )
-    return {
-        "task_id": result.task_id, "context_id": result.context_id,
-        "state": result.state, "text": result.text,
-        "usage": result.usage, "details": result.details,
-    }
+    """Ask a built-in or configured agent; launch its A2A server when absent."""
+    legacy_url = _legacy_custom_url(agent_id)
+    if legacy_url:
+        result = await BridgeClient().ask(
+            legacy_url, prompt, model=model, reasoning_effort=reasoning_effort,
+            tool_policy=tool_policy,
+        )
+        return {
+            "task_id": result.task_id, "context_id": result.context_id,
+            "state": result.state, "text": result.text,
+            "usage": result.usage, "details": result.details,
+        }
+    launch = _agent_launch(agent_id, workspace, model, tool_policy)
+    return await _managed_ask(launch, prompt, model, reasoning_effort, tool_policy)
 
 
 @mcp.tool()
-async def get_agent_info(agent_id: str) -> dict:
-    """Read capabilities and quota information for a configured agent profile."""
-    return await BridgeClient().info(_agent_url(agent_id))
+async def get_agent_info(agent_id: str, workspace: str | None = None) -> dict:
+    """Read agent capabilities, launching its A2A server when absent."""
+    legacy_url = _legacy_custom_url(agent_id)
+    if legacy_url:
+        return await BridgeClient().info(legacy_url)
+    async with connect_harness(_agent_launch(agent_id, workspace)) as peer:
+        return await BridgeClient().info(peer.url)
 
 
 @mcp.tool()
@@ -157,15 +194,8 @@ async def ask_antigravity(
     turn_timeout_seconds: float = 300,
 ) -> dict:
     """Delegate to Antigravity; workspace starts an isolated temporary Bridge."""
-    selected_workspace = workspace if workspace is not None else os.environ.get("BRIDGE_ANTIGRAVITY_WORKSPACE")
-    if selected_workspace is not None:
-        return await _managed_antigravity(
-            prompt, selected_workspace, model, reasoning_effort,
-            tool_policy, turn_timeout_seconds,
-        )
-    if turn_timeout_seconds != 300:
-        raise ValueError("turn_timeout_seconds requires a managed Antigravity workspace")
-    return await _ask("BRIDGE_ANTIGRAVITY_URL", prompt, model, reasoning_effort, tool_policy)
+    launch = _agent_launch("antigravity", workspace, model, tool_policy, turn_timeout_seconds)
+    return await _managed_ask(launch, prompt, model, reasoning_effort, tool_policy)
 
 
 @mcp.tool()
@@ -173,34 +203,25 @@ async def ask_codex(
     prompt: str,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    workspace: str | None = None,
 ) -> dict:
-    """Delegate to Codex. model and reasoning_effort select its thread settings."""
-    return await _ask("BRIDGE_CODEX_URL", prompt, model, reasoning_effort)
+    """Delegate to Codex, launching its A2A server when absent. Omit model unless requested."""
+    launch = _agent_launch("codex", workspace, model)
+    return await _managed_ask(launch, prompt, model, reasoning_effort, None)
 
 
 @mcp.tool()
 async def get_antigravity_info(workspace: str | None = None) -> dict:
     """Read Antigravity's current models, effort options and account quota without an agent turn."""
-    selected_workspace = workspace if workspace is not None else os.environ.get("BRIDGE_ANTIGRAVITY_WORKSPACE")
-    if selected_workspace is not None:
-        root = Path(selected_workspace).resolve(strict=True)
-        if not root.is_dir():
-            raise ValueError("workspace must be a directory")
-        async with connect_harness(HarnessLaunch("antigravity", _free_local_url(), root)) as peer:
-            return await BridgeClient().info(peer.url)
-    url = os.environ.get("BRIDGE_ANTIGRAVITY_URL")
-    if not url:
-        raise RuntimeError("Set BRIDGE_ANTIGRAVITY_URL to the local A2A server URL")
-    return await BridgeClient().info(url)
+    async with connect_harness(_agent_launch("antigravity", workspace)) as peer:
+        return await BridgeClient().info(peer.url)
 
 
 @mcp.tool()
-async def get_codex_info() -> dict:
+async def get_codex_info(workspace: str | None = None) -> dict:
     """Read Codex's current models, supported efforts and account quota without an agent turn."""
-    url = os.environ.get("BRIDGE_CODEX_URL")
-    if not url:
-        raise RuntimeError("Set BRIDGE_CODEX_URL to the local A2A server URL")
-    return await BridgeClient().info(url)
+    async with connect_harness(_agent_launch("codex", workspace)) as peer:
+        return await BridgeClient().info(peer.url)
 
 
 def main() -> None:

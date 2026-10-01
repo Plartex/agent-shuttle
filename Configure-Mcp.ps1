@@ -20,7 +20,7 @@ tool_timeout_sec = 1800
 [mcp_servers.agent_shuttle.env]
 BRIDGE_CODEX_URL = "http://127.0.0.1:8765"
 BRIDGE_ANTIGRAVITY_URL = "http://127.0.0.1:8766"
-BRIDGE_ANTIGRAVITY_WORKSPACE = '$tomlRoot'
+BRIDGE_WORKSPACE = '$tomlRoot'
 "@
 Set-Content -LiteralPath (Join-Path $codexDir 'config.toml') -Value $toml -Encoding utf8
 
@@ -32,12 +32,13 @@ $json = @{
             env = @{
                 BRIDGE_CODEX_URL = 'http://127.0.0.1:8765'
                 BRIDGE_ANTIGRAVITY_URL = 'http://127.0.0.1:8766'
-                BRIDGE_ANTIGRAVITY_WORKSPACE = $root
+                BRIDGE_WORKSPACE = $root
             }
         }
     }
 } | ConvertTo-Json -Depth 10
 Set-Content -LiteralPath (Join-Path $agentsDir 'mcp_config.json') -Value $json -Encoding utf8
 
-Write-Output 'Created .codex/config.toml and .agents/mcp_config.json with local absolute paths.'
+Write-Output 'Created .codex/config.toml and .agents/mcp_config.json; A2A servers start when requested.'
+Write-Output 'For Antigravity Desktop, check %USERPROFILE%\.gemini\config\mcp_config.json: its agent-bridge command may override this workspace config.'
 Write-Output 'For Antigravity CLI, register the same server globally with `agy mcp add` if workspace discovery is unavailable.'

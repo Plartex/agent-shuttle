@@ -169,10 +169,10 @@ agent-shuttle-mcp
 ```
 
 Available MCP tools:
-- `ask_agent(agent_id, prompt, model?, reasoning_effort?, tool_policy?)`: Routes requests to any agent mapped in the `BRIDGE_AGENTS_JSON` environment variable.
-- `get_agent_info(agent_id)`: Fetches live models and quotas for the profile agent.
-- `ask_antigravity(prompt, model?, reasoning_effort?, workspace?, tool_policy?, turn_timeout_seconds=300)`: Delegates directly to Antigravity (`BRIDGE_ANTIGRAVITY_URL` or a managed workspace server).
-- `ask_codex(prompt, model?, reasoning_effort?)`: Delegates directly to Codex (`BRIDGE_CODEX_URL`).
+- `ask_agent(agent_id, prompt, model?, reasoning_effort?, tool_policy?, workspace?)`: Reuses a matching local A2A server or starts a temporary one. Built-in IDs are `codex`, `antigravity`, `opencode`, and `claude_code`; the latter two need a profile or an Ollama model.
+- `get_agent_info(agent_id, workspace?)`: Fetches live models and quotas, starting a temporary server if needed.
+- `ask_antigravity(prompt, model?, reasoning_effort?, workspace?, tool_policy?, turn_timeout_seconds=300)`: Starts an Antigravity server if one is not running.
+- `ask_codex(prompt, model?, reasoning_effort?, workspace?)`: Starts a Codex server if one is not running.
 - `get_antigravity_info(workspace?)` & `get_codex_info()`: Read live capabilities and quota without burning model turns.
 
 ---

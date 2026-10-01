@@ -192,6 +192,7 @@ class CodexInfoTests(unittest.IsolatedAsyncioTestCase):
              patch("openai_codex.AsyncCodex", Codex):
             result = await CodexInfo(Path(folder)).fetch()
         self.assertEqual(result["capabilities"]["selected_effort"], "high")
+        self.assertIn("not an account access check", result["capabilities"]["model_access_note"])
         self.assertEqual(result["capabilities"]["models"][0]["efforts"], ["high"])
         self.assertEqual(result["usage"]["groups"][0]["buckets"][0]["remaining_percent"], 80)
         self.assertEqual(result["usage"]["rate_limit_reset_credits"]["resetType"], "codexRateLimits")

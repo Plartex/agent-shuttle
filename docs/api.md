@@ -285,27 +285,27 @@ agent-shuttle-mcp
 
 ### Environment Configuration
 
-- `BRIDGE_CODEX_URL`: Loopback URL for the Codex server (e.g. `http://127.0.0.1:8765`).
-- `BRIDGE_ANTIGRAVITY_URL`: Loopback URL for the Antigravity server (e.g. `http://127.0.0.1:8766`).
-- `BRIDGE_ANTIGRAVITY_WORKSPACE`: Default workspace for managed Antigravity instances.
-- `BRIDGE_AGENTS_JSON`: JSON map of custom agent profile IDs to local URLs:
+- `BRIDGE_WORKSPACE`: Default project directory for managed servers. Without it, the MCP process working directory is used; tools can also pass `workspace`.
+- `BRIDGE_CODEX_URL` and `BRIDGE_ANTIGRAVITY_URL`: Optional local addresses. If no matching server is running, MCP starts one at that address for the request.
+- `BRIDGE_AGENTS_JSON`: Optional map of custom agent IDs to launch settings. A plain URL remains accepted for a built-in agent ID:
   ```json
-  {"opencode-local": "http://127.0.0.1:8767", "claude-local": "http://127.0.0.1:8768"}
+  {"opencode-local": {"harness": "opencode", "profile": "C:/profiles/opencode.json", "url": "http://127.0.0.1:8767"}}
   ```
+  The URL is optional; without it, an available loopback port is chosen. Profile paths are needed to start custom OpenCode or Claude Code configurations. A custom ID with only a legacy URL must add `harness` and `profile` for automatic startup.
 
 ### Exposed MCP Tools
 
-1. **`ask_agent(agent_id, prompt, model?, reasoning_effort?, tool_policy?)`**  
-   Routes a prompt to any agent defined in `BRIDGE_AGENTS_JSON`.
+1. **`ask_agent(agent_id, prompt, model?, reasoning_effort?, tool_policy?, workspace?)`**
+   Uses a matching A2A server or starts one. Built-in IDs need no `BRIDGE_AGENTS_JSON` entry.
 
-2. **`get_agent_info(agent_id)`**  
-   Reads models, efforts, and quotas for the profile agent.
+2. **`get_agent_info(agent_id, workspace?)`**
+   Reads models, efforts, and quotas, starting a temporary server if needed.
 
 3. **`ask_antigravity(prompt, model?, reasoning_effort?, workspace?, tool_policy?, turn_timeout_seconds=300)`**  
-   Sends a task to Antigravity. If `workspace` is passed, dynamically provisions an isolated temporary Bridge server.
+   Sends a task to Antigravity, starting a temporary server if needed.
 
-4. **`ask_codex(prompt, model?, reasoning_effort?)`**  
-   Sends a task to Codex with optional thread model and effort overrides.
+4. **`ask_codex(prompt, model?, reasoning_effort?, workspace?)`**
+   Sends a task to Codex with optional thread model and effort overrides, starting a temporary server if needed.
 
 5. **`get_antigravity_info(workspace?)`**  
    Fetches Antigravity capabilities and `/usage` quotas without burning model turns.

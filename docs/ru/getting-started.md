@@ -41,16 +41,16 @@ Set-Location agent-shuttle
 # 3. Создание конфигураций MCP для Codex и Antigravity
 & .\Configure-Shuttle-Mcp.ps1
 
-# 4. Запуск фоновых серверов Codex (порт 8765) и Antigravity (порт 8766)
-& .\Start-Shuttle.ps1
+# 4. Откройте MCP-клиент и вызовите ask_codex или ask_antigravity.
+# При необходимости A2A-сервер запустится автоматически на время запроса.
 ```
 
-Для остановки серверов:
+Если вы также запускаете постоянные серверы вручную, остановите их так:
 ```powershell
 & .\Stop-Shuttle.ps1
 ```
 
-Логи работы и PID-файлы сохраняются в каталоге `.runtime/` (`codex.out.log`, `codex.err.log`, `antigravity.out.log`, `antigravity.err.log`).
+Логи и PID-файлы постоянных серверов сохраняются в каталоге `.runtime/` (`codex.out.log`, `codex.err.log`, `antigravity.out.log`, `antigravity.err.log`).
 
 ---
 
@@ -191,8 +191,10 @@ tool_timeout_sec = 1800
 [mcp_servers.agent_shuttle.env]
 BRIDGE_CODEX_URL = "http://127.0.0.1:8765"
 BRIDGE_ANTIGRAVITY_URL = "http://127.0.0.1:8766"
-BRIDGE_ANTIGRAVITY_WORKSPACE = "C:/path/to/project"
+BRIDGE_WORKSPACE = "C:/path/to/project"
 ```
+
+Для MCP-запросов отдельно запускать `agent-shuttle serve` не нужно: при отсутствии подходящего сервера Agent Shuttle временно запускает его на время вызова. `BRIDGE_WORKSPACE` задаёт проверяемый проект.
 
 После этого инструменты можно вызывать прямо в диалоге с агентом:
 ```text

@@ -180,6 +180,12 @@ class CodexInfo:
                     selected = next((model for model in catalog.data if model.is_default), None)
                 data["capabilities"] = {
                     "selected_model": configured_model or (selected.model if selected else None),
+                    "model_access_note": (
+                        "selected_model is the local Codex configuration, not an account access check. "
+                        "The App Server model catalog may be cached; a listed model can still be "
+                        "rejected for the signed-in ChatGPT account. Omit the model override unless "
+                        "the caller explicitly requests it."
+                    ),
                     "selected_effort": _enum_value(
                         effective.config.model_reasoning_effort
                         or (selected.default_reasoning_effort if selected else None)

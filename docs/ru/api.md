@@ -285,27 +285,27 @@ agent-shuttle-mcp
 
 ### Переменные окружения
 
-- `BRIDGE_CODEX_URL`: URL сервера Codex (например, `http://127.0.0.1:8765`).
-- `BRIDGE_ANTIGRAVITY_URL`: URL сервера Antigravity (например, `http://127.0.0.1:8766`).
-- `BRIDGE_ANTIGRAVITY_WORKSPACE`: Рабочий каталог по умолчанию для временных серверов Antigravity.
-- `BRIDGE_AGENTS_JSON`: JSON-словарь соответствия идентификаторов профилей и локальных адресов:
+- `BRIDGE_WORKSPACE`: Каталог проекта для временных серверов. Если не задан, используется рабочий каталог MCP-процесса; инструментам также можно передать `workspace`.
+- `BRIDGE_CODEX_URL` и `BRIDGE_ANTIGRAVITY_URL`: Необязательные локальные адреса. Если подходящий сервер не запущен, MCP запускает его на время запроса.
+- `BRIDGE_AGENTS_JSON`: Необязательные параметры запуска для произвольных идентификаторов агентов. Для встроенного идентификатора по-прежнему допустима строка URL:
   ```json
-  {"opencode-local": "http://127.0.0.1:8767", "claude-local": "http://127.0.0.1:8768"}
+  {"opencode-local": {"harness": "opencode", "profile": "C:/profiles/opencode.json", "url": "http://127.0.0.1:8767"}}
   ```
+  URL можно опустить: тогда выбирается свободный локальный порт. Для запуска пользовательских конфигураций OpenCode и Claude Code нужен путь к профилю. К прежней записи с произвольным ID и одним URL добавьте `harness` и `profile`.
 
 ### Доступные инструменты MCP
 
-1. **`ask_agent(agent_id, prompt, model?, reasoning_effort?, tool_policy?)`**  
-   Передает задачу любому профилю, заданному в `BRIDGE_AGENTS_JSON`.
+1. **`ask_agent(agent_id, prompt, model?, reasoning_effort?, tool_policy?, workspace?)`**
+   Использует подходящий A2A-сервер или запускает его. Встроенным идентификаторам запись в `BRIDGE_AGENTS_JSON` не нужна.
 
-2. **`get_agent_info(agent_id)`**  
-   Возвращает модели, усилия и квоты профильного агента.
+2. **`get_agent_info(agent_id, workspace?)`**
+   Возвращает модели, усилия и квоты, при необходимости запуская временный сервер.
 
 3. **`ask_antigravity(prompt, model?, reasoning_effort?, workspace?, tool_policy?, turn_timeout_seconds=300)`**  
-   Делегирует задачу Antigravity. Если передан параметр `workspace`, динамически создает временный изолированный сервер Bridge.
+   Делегирует задачу Antigravity, при необходимости запуская временный сервер.
 
-4. **`ask_codex(prompt, model?, reasoning_effort?)`**  
-   Делегирует задачу Codex с возможностью переопределения модели и усилия рассуждений.
+4. **`ask_codex(prompt, model?, reasoning_effort?, workspace?)`**
+   Делегирует задачу Codex с возможностью переопределения модели и усилия рассуждений, при необходимости запуская временный сервер.
 
 5. **`get_antigravity_info(workspace?)`**  
    Возвращает возможности и квоты Antigravity `/usage` без расхода лимитов моделей.
