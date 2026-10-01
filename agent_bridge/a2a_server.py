@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import inspect
+import math
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -40,6 +42,10 @@ class _SessionRecord:
     closed: bool = False
 
 
+class WorkerStalledError(TimeoutError):
+    pass
+
+
 class SessionManager:
     """Own backend conversations; one active turn at a time per session."""
 
@@ -58,6 +64,7 @@ class SessionManager:
         reasoning_effort: str | None,
         read_only: bool,
         tool_policy: str | None = None,
+        on_event=None,
     ) -> str | BackendResponse:
         settings = (model, reasoning_effort, read_only, tool_policy)
         async with self.lock:
@@ -79,8 +86,9 @@ class SessionManager:
                 raise RuntimeError("Session was closed during a concurrent request")
             record.last_used = monotonic()
             try:
-                return await record.backend.ask(prompt)
-            except asyncio.CancelledError:
+                kwargs = {"on_event": on_event} if "on_event" in inspect.signature(record.backend.ask).parameters else {}
+                return await record.backend.ask(prompt, **kwargs)
+            except (asyncio.CancelledError, TimeoutError):
                 # The provider may have performed side effects before its turn
                 # was interrupted. Never continue that same native conversation.
                 record.closed = True
@@ -126,9 +134,12 @@ class SessionManager:
 
 
 class BridgeExecutor(AgentExecutor):
-    def __init__(self, backend: Backend, sessions: SessionManager):
+    def __init__(self, backend: Backend, sessions: SessionManager,
+                 execution_timeout_seconds: float = 1800, stall_timeout_seconds: float = 1800):
         self.backend = backend
         self.sessions = sessions
+        self.execution_timeout_seconds = execution_timeout_seconds
+        self.stall_timeout_seconds = stall_timeout_seconds
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         prompt = get_message_text(context.message).strip()
@@ -211,24 +222,56 @@ class BridgeExecutor(AgentExecutor):
                 )
                 return
         await updater.update_status(TaskState.TASK_STATE_WORKING)
+        started = monotonic()
+        last_activity = started
+
+        async def on_event(event):
+            nonlocal last_activity
+            last_activity = monotonic()
+            message = new_text_message(str(event.get("text", "")) or str(event.get("kind", "activity")))
+            message.metadata["agent_bridge.event"] = event
+            await updater.update_status(TaskState.TASK_STATE_WORKING, message)
+
+        async def run():
+            if session_id is not None:
+                return await self.sessions.run(session_id, prompt, model, reasoning_effort, read_only,
+                                               tool_policy, on_event=on_event)
+            kwargs = {"reasoning_effort": reasoning_effort, "read_only": read_only}
+            if tool_policy is not None:
+                kwargs["tool_policy"] = tool_policy
+            if "on_event" in inspect.signature(self.backend.run).parameters:
+                kwargs["on_event"] = on_event
+            return await self.backend.run(prompt, model, **kwargs)
+
+        running = asyncio.create_task(run())
         try:
-            if session_id is None:
-                kwargs = {"reasoning_effort": reasoning_effort, "read_only": read_only}
-                if tool_policy is not None:
-                    kwargs["tool_policy"] = tool_policy
-                answer = await self.backend.run(
-                    prompt, model, **kwargs,
-                )
-            else:
-                answer = await self.sessions.run(
-                    session_id, prompt, model, reasoning_effort, read_only, tool_policy,
-                )
+            while not running.done():
+                now = monotonic()
+                remaining = min(self.execution_timeout_seconds - (now - started),
+                                self.stall_timeout_seconds - (now - last_activity))
+                if remaining <= 0:
+                    if now - started >= self.execution_timeout_seconds:
+                        raise TimeoutError("Worker exceeded its execution budget")
+                    raise WorkerStalledError("Worker exceeded its inactivity budget")
+                await asyncio.wait({running}, timeout=remaining)
+            answer = await running
         except Exception as exc:
+            running.cancel()
+            await asyncio.gather(running, return_exceptions=True)
+            code = ("worker_stalled" if isinstance(exc, WorkerStalledError) else
+                    "worker_timeout" if isinstance(exc, TimeoutError) else "backend_error")
+            error = {"code": code,
+                     "type": type(exc).__name__, "message": str(exc), "retryable": False}
             await updater.update_status(
                 TaskState.TASK_STATE_FAILED,
                 new_text_message(f"{type(exc).__name__}: {exc}"),
+                metadata={"agent_bridge.error": error},
             )
             return
+        except asyncio.CancelledError:
+            running.cancel()
+            await asyncio.gather(running, return_exceptions=True)
+            raise
         metadata = None
         if isinstance(answer, BackendResponse):
             metadata = {}
@@ -259,7 +302,7 @@ class _IdempotentRequestHandler(DefaultRequestHandler):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._request_lock = asyncio.Lock()
-        self._requests: dict[str, tuple[bytes, asyncio.Task]] = {}
+        self._requests: dict[tuple[str, str], tuple[bytes, asyncio.Task]] = {}
 
     async def on_message_send(self, params, context):
         request_id = (
@@ -275,20 +318,38 @@ class _IdempotentRequestHandler(DefaultRequestHandler):
         if params.message.message_id != request_id:
             raise InvalidParamsError("message_id must match agent_bridge.request_id")
         fingerprint = params.SerializeToString(deterministic=True)
+        key = (context.user.user_name, request_id)
         async with self._request_lock:
-            previous = self._requests.get(request_id)
+            previous = self._requests.get(key)
             if previous is not None:
                 if previous[0] != fingerprint:
                     raise InvalidParamsError("request_id is already bound to another request")
                 submitted = previous[1]
             else:
+                lookup = getattr(self.task_store, "request_task", None)
+                if lookup is not None:
+                    stored = await lookup(request_id, fingerprint, context)
+                    if stored is not None:
+                        return stored
+                    task = new_task_from_user_message(params.message)
+                    task_id, created = await self.task_store.bind_request(request_id, fingerprint, task, context)
+                    if not created:
+                        return await self.task_store.get(task_id, context)
+                    params = type(params).FromString(params.SerializeToString())
+                    params.message.task_id = task_id
+                    params.message.context_id = task.context_id
                 submitted = asyncio.create_task(super().on_message_send(params, context))
-                self._requests[request_id] = (fingerprint, submitted)
+                self._requests[key] = (fingerprint, submitted)
         # A dropped HTTP caller must not abort the only copy of its task.
         return await asyncio.shield(submitted)
 
 
-def make_app(name: str, backend: Backend, url: str, info_provider: InfoProvider | None = None) -> Starlette:
+def make_app(name: str, backend: Backend, url: str, info_provider: InfoProvider | None = None,
+             *, task_store=None, execution_timeout_seconds: float = 1800,
+             stall_timeout_seconds: float = 1800) -> Starlette:
+    for budget in (execution_timeout_seconds, stall_timeout_seconds):
+        if isinstance(budget, bool) or not isinstance(budget, (int, float)) or not math.isfinite(budget) or budget <= 0:
+            raise ValueError("worker budgets must be positive finite numbers")
     sessions = SessionManager(backend)
     skill = AgentSkill(
         id=f"run_{name}",
@@ -316,8 +377,8 @@ def make_app(name: str, backend: Backend, url: str, info_provider: InfoProvider 
         skills=[skill],
     )
     handler = _IdempotentRequestHandler(
-        agent_executor=BridgeExecutor(backend, sessions),
-        task_store=InMemoryTaskStore(),
+        agent_executor=BridgeExecutor(backend, sessions, execution_timeout_seconds, stall_timeout_seconds),
+        task_store=task_store or InMemoryTaskStore(),
         agent_card=card,
     )
     def identity_data() -> dict:
@@ -332,18 +393,42 @@ def make_app(name: str, backend: Backend, url: str, info_provider: InfoProvider 
             )
             workspace = getattr(backend, "workspace", None)
         result = {"agent": name, "backend": backend_name, "pid": os.getpid()}
+        database = getattr(handler.task_store, "path", None)
+        result["task_storage"] = "sqlite" if isinstance(database, Path) else "memory"
+        result["task_db_path"] = str(database) if isinstance(database, Path) else None
+        result["supported_tool_policies"] = []
+        result["default_tool_policy"] = None
         if isinstance(backend, ProfiledBackend):
             result["max_tool_policy"] = backend.profile.max_tool_policy.value
+            policies = list(ToolPolicy)
+            maximum = policies.index(backend.profile.max_tool_policy)
+            result["supported_tool_policies"] = [p.value for p in policies[:maximum + 1]]
+            result["default_tool_policy"] = backend.profile.default_tool_policy.value
+        elif isinstance(backend, CodexBackend):
+            result["supported_tool_policies"] = ["read_only", "workspace_write", "full_access"]
+            result["default_tool_policy"] = "workspace_write"
         if isinstance(workspace, Path):
             result["workspace"] = str(workspace.resolve(strict=True))
         result["read_only_tools"] = (
-            isinstance(backend, CodexBackend)
+            isinstance(backend, (CodexBackend, AntigravityCliBackend))
             or isinstance(backend, ProfiledBackend)
             and backend.profile.max_tool_policy in {
                 ToolPolicy.READ_ONLY, ToolPolicy.WORKSPACE_WRITE, ToolPolicy.FULL_ACCESS,
             }
         )
         if isinstance(backend, AntigravityCliBackend):
+            result["supported_tool_policies"] = ["no_tools", "read_only", "workspace_write"]
+            result["tool_policy_enforcement"] = "agy_pre_tool_use"
+            if backend.dangerously_skip_permissions:
+                result["supported_tool_policies"].append("full_access")
+                result["default_tool_policy"] = "full_access"
+            result["tool_policy_notes"] = (
+                ("This server auto-approves all tools. " if backend.dangerously_skip_permissions
+                 else "With no explicit policy, agy uses its settings; headless workspace file writes may be allowed. ")
+                + "Explicit scoped policies use a verified per-conversation PreToolUse hook. "
+                "workspace_write allows native file edits only; shell, MCP, subagents and "
+                "external paths are blocked. This is tool gating, not an OS process sandbox."
+            )
             result["agy_permission_mode"] = (
                 "all" if backend.dangerously_skip_permissions else "settings"
             )
@@ -376,24 +461,38 @@ def make_app(name: str, backend: Backend, url: str, info_provider: InfoProvider 
 
     @asynccontextmanager
     async def lifespan(app):
+        acquire = getattr(handler.task_store, "acquire_owner", None)
+        if acquire is not None:
+            acquire()
         async def reap_loop():
             while True:
                 await asyncio.sleep(60)
                 await sessions.reap_idle()
 
-        janitor = asyncio.create_task(reap_loop())
+        janitor = None
         try:
+            recover = getattr(handler.task_store, "recover_interrupted", None)
+            if recover is not None:
+                await recover()
+            janitor = asyncio.create_task(reap_loop())
             yield
         finally:
-            janitor.cancel()
             try:
-                await janitor
-            except asyncio.CancelledError:
-                pass
-            await sessions.close_all()
-            shutdown = getattr(backend, "close", None)
-            if shutdown is not None:
-                await shutdown()
+                if janitor is not None:
+                    janitor.cancel()
+                    try:
+                        await janitor
+                    except asyncio.CancelledError:
+                        pass
+                await handler._active_task_registry.aclose()
+                await sessions.close_all()
+                shutdown = getattr(backend, "close", None)
+                if shutdown is not None:
+                    await shutdown()
+            finally:
+                close_store = getattr(handler.task_store, "close", None)
+                if close_store is not None:
+                    close_store()
 
     return Starlette(
         lifespan=lifespan,

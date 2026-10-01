@@ -35,6 +35,40 @@ class McpAutostartTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(launches[0].workspace, Path(folder).resolve())
             self.assertTrue(launches[0].url.startswith("http://127.0.0.1:"))
             client.ask.assert_awaited_once()
+            self.assertEqual(client.ask.call_args.kwargs["tool_policy"], "read_only")
+
+    async def test_client_does_not_need_local_instructions_to_choose_safe_defaults(self):
+        with tempfile.TemporaryDirectory() as folder, \
+             patch.dict(os.environ, {"BRIDGE_WORKSPACE": folder}, clear=True):
+            for name in ("codex", "antigravity"):
+                self.assertEqual(mcp_server._agent_launch(name).tool_policy, "read_only")
+                self.assertEqual(mcp_server._agent_launch(name, tool_policy="workspace_write").tool_policy,
+                                 "workspace_write")
+
+    async def test_stale_peer_policy_does_not_require_a_manual_restart(self):
+        from agent_bridge.managed import HarnessConfigurationMismatch
+
+        with tempfile.TemporaryDirectory() as folder:
+            launches = []
+
+            @asynccontextmanager
+            async def connection(launch):
+                launches.append(launch)
+                if len(launches) == 1:
+                    raise HarnessConfigurationMismatch("old server cannot confirm read-only tools")
+                yield SimpleNamespace(url=launch.url, started=True)
+
+            client = SimpleNamespace(ask=AsyncMock(return_value=SimpleNamespace(
+                task_id="task", context_id="context", state="TASK_STATE_COMPLETED",
+                text="done", usage=None, details=None,
+            )))
+            with patch.object(mcp_server, "connect_harness", connection), \
+                 patch.object(mcp_server, "BridgeClient", return_value=client):
+                result = await mcp_server.ask_antigravity("Inspect this project", workspace=folder)
+            self.assertEqual(result["text"], "done")
+            self.assertEqual(len(launches), 2)
+            self.assertNotEqual(launches[0].url, launches[1].url)
+            self.assertEqual(launches[1].tool_policy, "read_only")
 
     async def test_configured_profile_starts_when_url_is_absent(self):
         with tempfile.TemporaryDirectory() as folder:

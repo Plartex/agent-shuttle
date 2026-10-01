@@ -168,6 +168,56 @@ class TaskLifecycleTest(unittest.IsolatedAsyncioTestCase):
         snapshot = await asyncio.wait_for(waiting, 0.5)
         self.assertEqual(snapshot.state, "TASK_STATE_SUBMITTED")
 
+    async def test_worker_execution_timeout_fails_task_and_stops_backend(self):
+        await self._reconfigure(execution_timeout_seconds=0.1)
+        handle = await BridgeClient(timeout_seconds=3).submit(self.url, "stalled")
+        result = await handle.wait(2)
+        self.assertEqual(result.state, "TASK_STATE_FAILED")
+        self.assertEqual(result.error["code"], "worker_timeout")
+        self.assertTrue(self.backend.cancelled.is_set())
+
+    async def _reconfigure(self, **options):
+        self.server.should_exit = True
+        await self.running
+        port = int(self.url.rsplit(":", 1)[1])
+        self.server = uvicorn.Server(uvicorn.Config(
+            make_app("slow", self.backend, self.url, **options),
+            host="127.0.0.1", port=port, log_level="error",
+        ))
+        self.running = asyncio.create_task(self.server.serve())
+        while not self.server.started:
+            await asyncio.sleep(0.01)
+
+    async def test_silent_worker_has_distinct_stalled_error_and_is_cancelled(self):
+        await self._reconfigure(execution_timeout_seconds=2, stall_timeout_seconds=0.1)
+        handle = await BridgeClient(timeout_seconds=3).submit(self.url, "stalled")
+        result = await handle.wait(2)
+        self.assertEqual(result.state, "TASK_STATE_FAILED")
+        self.assertEqual(result.error["code"], "worker_stalled")
+        self.assertTrue(self.backend.cancelled.is_set())
+
+    async def test_native_activity_extends_stall_budget_and_is_present_in_transcript(self):
+        async def active(prompt, model=None, *, reasoning_effort=None, read_only=False, on_event=None):
+            for _ in range(8):
+                await on_event({"kind": "tool", "text": "reading source"})
+                await asyncio.sleep(0.03)
+            return "done"
+        self.backend.run = active
+        await self._reconfigure(execution_timeout_seconds=2, stall_timeout_seconds=0.12)
+        handle = await BridgeClient(timeout_seconds=3).submit(self.url, "active")
+        self.assertEqual((await handle.wait(2)).state, "TASK_STATE_COMPLETED")
+        transcript = await handle.transcript()
+        self.assertIn("agent_bridge.event", str(transcript))
+
+    async def test_backend_failure_preserves_structured_error(self):
+        async def fail(*args, **kwargs):
+            raise ValueError("broken configuration")
+        self.backend.run = fail
+        result = await BridgeClient(timeout_seconds=3).ask(self.url, "failure")
+        self.assertEqual(result.state, "TASK_STATE_FAILED")
+        self.assertEqual(result.error["type"], "ValueError")
+        self.assertFalse(result.error["retryable"])
+
     async def test_cancelled_bridge_session_refuses_followup_locally(self):
         client = BridgeClient(timeout_seconds=3)
         async with client.session(self.url) as session:

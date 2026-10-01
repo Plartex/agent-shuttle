@@ -157,6 +157,9 @@ Available MCP tools:
 - `ask_antigravity(prompt, model?, reasoning_effort?, workspace?, tool_policy?, turn_timeout_seconds=300)`: Starts an Antigravity server if one is not running.
 - `ask_codex(prompt, model?, reasoning_effort?, workspace?)`: Starts a Codex server if one is not running.
 - `get_antigravity_info(workspace?)` & `get_codex_info()`: Read live capabilities and quota without burning model turns.
+- `submit_task(agent_id, prompt, model?, reasoning_effort?, tool_policy?, workspace?, request_id?)`: Start a long task and return its ID immediately.
+- `check_task(task_id)`, `wait_task(task_id, timeout_seconds?)`, `cancel_task(task_id)`: Inspect, wait for, or stop a task.
+- `get_result(task_id, cursor?, limit?)`, `get_transcript(task_id, cursor?, limit?)`: Read bounded pages of output and history.
 
 ---
 
@@ -175,7 +178,7 @@ Model parameters are passed as A2A metadata keys (`agent_bridge.model`, `agent_b
 - Every server binds to a strictly validated, canonical workspace directory.
 - `connect_harness()` verifies that an existing server's workspace matches the caller's target workspace before reusing it.
 - **Sessions:** `BridgeSession` maintains a stateful conversation across multiple `ask()` calls. Conversation settings (model, effort, tool policy) are pinned at session creation and cannot be changed mid-session. Idle sessions are cleaned up automatically after 30 minutes.
-- **Task lifecycle:** `ShuttleClient.submit()` returns a `TaskHandle` immediately. Use `status()`, bounded `wait(timeout)`, `events()`, `result()`, or `cancel()`; reopen a live task by ID with `client.task(url, task_id)`. A wait timeout does not stop the agent. An optional UUID `request_id` deduplicates retried submissions during the current server lifetime. Task state is currently in memory and does not survive a server restart. See the [API reference](docs/api.md#taskhandle-and-bridgeevent).
+- **Task lifecycle:** `ShuttleClient.submit()` returns a `TaskHandle` immediately. Use `status()`, bounded `wait(timeout)`, `events()`, `result_page()`, `transcript()`, `result()`, or `cancel()`; reopen a task by ID with `client.task(url, task_id)`. A wait timeout does not stop the agent. An optional UUID `request_id` deduplicates retried submissions. Standalone servers can persist tasks with `--task-db`; MCP task tools do this automatically in the workspace's `.agent-shuttle` directory. Completed results survive restart; interrupted work is marked failed without replay. See the [API reference](docs/api.md#taskhandle-and-bridgeevent).
 
 ### Safety & Tool Policies
 Agent Shuttle defines four standardized tool policies:

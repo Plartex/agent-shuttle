@@ -47,14 +47,14 @@ client = ShuttleClient(timeout_seconds: float = 1800)
   - `read_only`: Backward-compatible boolean flag for read-only tools.
   - `tool_policy`: One of `"no_tools"`, `"read_only"`, `"workspace_write"`, or `"full_access"`.
   - `session_id`: Optional UUID string identifying a persistent conversation.
-  - `request_id`: Optional UUID for deduplicating retries within one server lifetime. Reusing it with different arguments is an error.
+- `request_id`: Optional UUID for deduplicating retries. With `--task-db`, bindings survive a server restart. Reusing it with different arguments is an error.
   - Returns: `BridgeResult`.
 
 - **`async def submit(..., request_id: str | None = None) -> TaskHandle`**
   Accepts the same task options as `ask()` and returns as soon as A2A creates the task. Unlike `ask()`, stopping the caller does not cancel the submitted task.
 
 - **`task(peer_url: str, task_id: str) -> TaskHandle`**
-  Reopens a task from its ID while the same server instance is running.
+  Reopens a task from its ID. A server started with `--task-db` can reopen stored tasks after restart.
 
 - **`task_status(peer_url, task_id)` / `cancel_task(peer_url, task_id)`**
   Fetch the current A2A task or request its cancellation.
@@ -66,7 +66,7 @@ client = ShuttleClient(timeout_seconds: float = 1800)
   Returns a comprehensive snapshot including capabilities, model catalog, reasoning efforts, and live account quota buckets.
 
 - **`async def identity(peer_url: str) -> dict`**  
-  Lightweight check returning `agent`, `backend`, the actual server `pid`, `workspace`, `read_only_tools`, `max_tool_policy`, `agy_permission_mode`, and `agy_turn_timeout_seconds`. Does **not** trigger expensive model or CLI queries.
+  Lightweight check returning `agent`, `backend`, the actual server `pid`, `workspace`, `read_only_tools`, `supported_tool_policies`, `default_tool_policy`, `max_tool_policy`, `agy_permission_mode`, and `agy_turn_timeout_seconds`. Antigravity also reports `tool_policy_enforcement` and `tool_policy_notes`. Does **not** trigger expensive model or CLI queries.
 
 - **`async def capabilities(peer_url: str) -> dict`**  
   Returns model list, selected model, effort options, and tool policy limits.
@@ -93,7 +93,7 @@ if snapshot.state == "TASK_STATE_WORKING":
 # cancelled = await handle.cancel()
 ```
 
-`status()` returns a `BridgeResult` snapshot. `wait(timeout)` returns the latest snapshot when the wait budget expires; `result()` waits until a terminal or input-required state. `events()` yields live `BridgeEvent(kind, task_id, state, text)` updates; after a stream disconnect, call `status()` to recover the authoritative state. Repeated `cancel()` calls on a cancelled task return its cancelled status. A task store is currently **in memory**: IDs and deduplication bindings do not survive a server restart. Cancellation of a persistent turn closes that native session; create a new session rather than silently continuing a potentially inconsistent one.
+`status()` returns a `BridgeResult` snapshot. `wait(timeout)` returns the latest snapshot when its finite, nonnegative wait budget expires; `result()` waits until a terminal or input-required state. `result_page(cursor, limit)` reads up to 60,000 characters; `transcript(cursor, limit)` reads up to 100 history/artifact items with a 60,000-character page budget. Follow `next_cursor` to continue. `events()` yields live `BridgeEvent(kind, task_id, state, text, data)` updates; after a stream disconnect, call `status()` to recover the authoritative state. Repeated `cancel()` calls on a cancelled task return its cancelled status. Plain A2A servers keep tasks in memory unless started with `--task-db`. On restart, unfinished persisted tasks become failed with an interruption error; they are never replayed automatically. Cancellation of a persistent turn closes that native session; create a new session before continuing.
 
 ---
 
@@ -111,6 +111,7 @@ class BridgeResult:
     text: str
     usage: dict[str, int] | None = None
     details: dict | None = None
+    error: dict | None = None
 ```
 
 - `state`: Task state name (e.g. `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED`, `message`).
@@ -234,7 +235,7 @@ Starts an A2A server:
 
 ```powershell
 # Serve Codex
-agent-shuttle serve codex --port 8765 [--workspace <DIR>]
+agent-shuttle serve codex --port 8765 [--workspace <DIR>] [--task-db <FILE>]
 
 # Serve Antigravity CLI
 agent-shuttle serve antigravity --port 8766 [--workspace <DIR>] `
@@ -245,6 +246,8 @@ agent-shuttle serve antigravity --port 8766 [--workspace <DIR>] `
 # Serve OpenCode or Claude Code from a profile
 agent-shuttle serve profile --profile .\profile.json --port 8767 [--workspace <DIR>]
 ```
+
+`--task-db` enables SQLite persistence for tasks and request IDs. `--execution-timeout-seconds` (default 1800) bounds a whole turn; `--stall-timeout-seconds` (default 1800) bounds silence between backend progress events. Managed MCP task peers use a SQLite file automatically.
 
 ### `agent-shuttle ask`
 
@@ -287,6 +290,7 @@ agent-shuttle-mcp
 
 - `BRIDGE_WORKSPACE`: Default project directory for managed servers. Without it, the MCP process working directory is used; tools can also pass `workspace`.
 - `BRIDGE_CODEX_URL` and `BRIDGE_ANTIGRAVITY_URL`: Optional local addresses. If no matching server is running, MCP starts one at that address for the request.
+- `BRIDGE_TASK_REGISTRY`: Optional path for MCP task tickets (default: `<BRIDGE_WORKSPACE>/.agent-shuttle/mcp-tasks.json`). The managed A2A task databases are stored in each target workspace's `.agent-shuttle` directory.
 - `BRIDGE_AGENTS_JSON`: Optional map of custom agent IDs to launch settings. A plain URL remains accepted for a built-in agent ID:
   ```json
   {"opencode-local": {"harness": "opencode", "profile": "C:/profiles/opencode.json", "url": "http://127.0.0.1:8767"}}
@@ -312,3 +316,12 @@ agent-shuttle-mcp
 
 6. **`get_codex_info()`**  
    Fetches Codex models and rate limits via `account/rateLimits/read`.
+
+7. **`submit_task(agent_id, prompt, model?, reasoning_effort?, tool_policy?, workspace?, request_id?)`**
+   Returns `task_id` immediately and keeps the managed A2A peer available between calls. Reuse a UUID `request_id` when retrying an uncertain submission.
+
+8. **`check_task(task_id)` / `wait_task(task_id, timeout_seconds=180)` / `cancel_task(task_id)`**
+   Read status, wait within a separate budget, or explicitly cancel. Waiting out the budget does not stop execution.
+
+9. **`get_result(task_id, cursor=0, limit=60000)` / `get_transcript(task_id, cursor=0, limit=100)`**
+   Read bounded pages; continue with `next_cursor` until it is `null`. Stored results and transcripts remain readable after MCP restart; interrupted work becomes failed.

@@ -348,18 +348,13 @@ class ManagedHarnessTests(unittest.IsolatedAsyncioTestCase):
                         pass
             popen.assert_not_called()
 
-    async def test_antigravity_all_permissions_rejects_nonboolean_and_read_only(self):
+    async def test_antigravity_permissions_reject_nonboolean_before_connecting(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             client = SimpleNamespace(capabilities=AsyncMock())
             for launch, message in (
                 (HarnessLaunch("antigravity", "http://127.0.0.1:8766", root,
                                agy_dangerously_skip_permissions="false"), "boolean"),
-                (HarnessLaunch("antigravity", "http://127.0.0.1:8766", root,
-                               tool_policy="read_only",
-                               agy_dangerously_skip_permissions=True), "read_only"),
-                (HarnessLaunch("antigravity", "http://127.0.0.1:8766", root,
-                               tool_policy="no_tools"), "no_tools"),
             ):
                 with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
                     async with connect_harness(launch, client=client):

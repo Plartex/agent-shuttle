@@ -77,6 +77,7 @@ class HarnessLaunch:
     tool_policy: str | None = None
     agy_dangerously_skip_permissions: bool = False
     agy_turn_timeout_seconds: float = 300
+    task_db: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -86,10 +87,14 @@ class BridgeConnection:
     log_path: Path | None = None
 
 
+class HarnessConfigurationMismatch(ValueError):
+    """A live peer cannot serve the requested workspace or access policy."""
+
+
 def _verify_backend(name: str, url: str, info: dict) -> None:
     backend = info.get("backend")
     if backend not in _BACKENDS[name]:
-        raise ValueError(f"{url} serves backend {backend!r}, not {name!r}")
+        raise HarnessConfigurationMismatch(f"{url} serves backend {backend!r}, not {name!r}")
 
 
 def _verify_connection(launch: HarnessLaunch, info: dict) -> None:
@@ -97,24 +102,32 @@ def _verify_connection(launch: HarnessLaunch, info: dict) -> None:
     expected = launch.workspace.resolve(strict=True)
     reported = info.get("workspace")
     if not isinstance(reported, str) or not Path(reported).is_absolute():
-        raise ValueError(f"{launch.url} did not report a valid workspace")
+        raise HarnessConfigurationMismatch(f"{launch.url} did not report a valid workspace")
     try:
         actual = Path(reported).resolve(strict=True)
     except OSError as exc:
-        raise ValueError(f"{launch.url} reported an inaccessible workspace") from exc
+        raise HarnessConfigurationMismatch(f"{launch.url} reported an inaccessible workspace") from exc
     if os.path.normcase(str(actual)) != os.path.normcase(str(expected)):
-        raise ValueError(f"{launch.url} workspace {actual} does not match {expected}")
+        raise HarnessConfigurationMismatch(f"{launch.url} workspace {actual} does not match {expected}")
+    if launch.task_db is not None:
+        reported_db = info.get("task_db_path")
+        if (info.get("task_storage") != "sqlite" or not isinstance(reported_db, str)
+                or os.path.normcase(str(Path(reported_db).resolve())) != os.path.normcase(str(launch.task_db.resolve()))):
+            raise HarnessConfigurationMismatch(f"{launch.url} does not use the requested persistent task database")
     if launch.tool_policy == "read_only" and info.get("read_only_tools") is not True:
-        raise ValueError(f"{launch.url} cannot confirm read-only tools")
+        raise HarnessConfigurationMismatch(f"{launch.url} cannot confirm read-only tools")
+    policies = info.get("supported_tool_policies")
+    if launch.tool_policy is not None and isinstance(policies, list) and launch.tool_policy not in policies:
+        raise HarnessConfigurationMismatch(f"{launch.url} cannot enforce {launch.tool_policy}")
     if launch.name == "antigravity":
         expected_mode = (
             "all" if launch.tool_policy == "full_access" or launch.agy_dangerously_skip_permissions
             else "settings"
         )
         if info.get("agy_permission_mode") != expected_mode:
-            raise ValueError(f"{launch.url} Antigravity permission mode does not match {expected_mode!r}")
+            raise HarnessConfigurationMismatch(f"{launch.url} Antigravity permission mode does not match {expected_mode!r}")
         if info.get("agy_turn_timeout_seconds") != launch.agy_turn_timeout_seconds:
-            raise ValueError(f"{launch.url} Antigravity turn timeout does not match")
+            raise HarnessConfigurationMismatch(f"{launch.url} Antigravity turn timeout does not match")
 
 
 def _local_port(url: str) -> int:
@@ -150,8 +163,6 @@ async def connect_harness(
                 or isinstance(launch.agy_turn_timeout_seconds, bool)
                 or not 0 < launch.agy_turn_timeout_seconds < float("inf")):
             raise ValueError("agy_turn_timeout_seconds must be positive and finite")
-    if launch.name == "antigravity" and launch.tool_policy not in {None, "full_access"}:
-        raise ValueError(f"Antigravity CLI cannot enforce {launch.tool_policy}")
     client = client or BridgeClient()
     identify = getattr(client, "identity", None) or client.capabilities
     _trace("checking existing server")
@@ -202,6 +213,8 @@ async def connect_harness(
                 "--port", str(port), "--workspace", str(workspace)]
         if profile_path:
             argv.extend(["--profile", str(profile_path)])
+        if launch.task_db is not None:
+            argv.extend(["--task-db", str(launch.task_db)])
         if launch.name == "antigravity":
             argv.extend(["--agy-command", command])
             argv.extend(["--agy-turn-timeout-seconds", f"{launch.agy_turn_timeout_seconds:g}"])

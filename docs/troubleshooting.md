@@ -42,6 +42,11 @@ The task fails with `AntigravityPermissionDenied: agy denied a required tool (..
 In headless mode (`-p`), the Antigravity CLI cannot prompt the user interactively with approval dialogs. If an action is governed by an `ask` or `deny` rule in your settings, `agy` denies the tool execution. Upstream `agy` frequently exits with return code `0` and reports `status: "SUCCESS"` even though the tool was blocked and the output is truncated or empty.
 
 **Resolution:**
+
+For MCP calls, Agent Shuttle defaults to the verified `read_only` task gate. A coordinator delegating an authorized edit should select `workspace_write`; no global allowlist is required. An error naming `task policy ... denied tools` comes from that gate: shell, MCP, subagents and external paths remain blocked. Run relevant test commands in the coordinator's authorized environment. If the policy probe fails, the user task was not sent; check the installed CLI's hook support and the bridge diagnostic instead of widening access.
+
+For legacy Python/A2A calls with `tool_policy=None`, native CLI settings apply:
+
 1. Check your user settings in `~/.gemini/antigravity-cli/settings.json`.
 2. Remember rule precedence: `deny` > `ask` > `allow`.
 3. If using headless mode, explicitly allow the required tools in `permissions.allow` (e.g. `read_file`, `list_dir`).

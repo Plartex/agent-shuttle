@@ -6,9 +6,14 @@ import asyncio
 import json
 import math
 import os
+import signal
+import subprocess
+from types import SimpleNamespace
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
+
+from .agy_policy import SCOPED_POLICIES, ScopedAgyPolicy
 
 
 class AntigravityPermissionDenied(RuntimeError):
@@ -173,6 +178,43 @@ def _codex_response(result) -> BackendResponse:
     return BackendResponse(result.final_response or "", usage)
 
 
+async def _run_codex_thread(thread, prompt, on_event=None):
+    if on_event is None:
+        return _codex_response(await thread.run(prompt))
+    turn = await thread.turn(prompt)
+    stream = turn.stream()
+    final = fallback = None
+    usage = completed = None
+    try:
+        async for event in stream:
+            payload = event.payload
+            await on_event({"kind": event.method,
+                            "text": getattr(payload, "delta", "") if isinstance(getattr(payload, "delta", ""), str) else "",
+                            "data": payload.model_dump(mode="json", exclude_none=True)})
+            if event.method == "item/completed":
+                item = payload.item.root if hasattr(payload.item, "root") else payload.item
+                if getattr(item, "type", None) == "agentMessage":
+                    phase = getattr(item, "phase", None)
+                    if getattr(phase, "value", phase) == "final_answer":
+                        final = item.text
+                    elif phase is None:
+                        fallback = item.text
+            elif event.method == "thread/tokenUsage/updated":
+                usage = payload.token_usage
+            elif event.method == "turn/completed":
+                completed = payload.turn
+        if completed is None:
+            raise RuntimeError("Codex did not report turn completion")
+        if getattr(completed.status, "value", completed.status) == "failed":
+            raise RuntimeError(completed.error.message if completed.error else "Codex turn failed")
+        return _codex_response(SimpleNamespace(final_response=final or fallback, usage=usage))
+    except asyncio.CancelledError:
+        await turn.interrupt()
+        raise
+    finally:
+        await stream.aclose()
+
+
 def _codex_sandbox(sandbox_type, read_only: bool, tool_policy: str | None):
     if read_only and tool_policy not in (None, "read_only"):
         raise ValueError("read_only conflicts with tool_policy")
@@ -202,6 +244,7 @@ class CodexBackend:
         reasoning_effort: str | None = None,
         read_only: bool = False,
         tool_policy: str | None = None,
+        on_event=None,
     ) -> BackendResponse:
         from openai_codex import AsyncCodex, CodexConfig, Sandbox
 
@@ -221,8 +264,7 @@ class CodexBackend:
                 ),
                 sandbox=sandbox,
             )
-            result = await thread.run(prompt)
-            return _codex_response(result)
+            return await _run_codex_thread(thread, prompt, on_event)
 
     async def open_session(
         self,
@@ -260,9 +302,8 @@ class _CodexSession:
         self.codex = codex
         self.thread = thread
 
-    async def ask(self, prompt: str) -> BackendResponse:
-        result = await self.thread.run(prompt)
-        return _codex_response(result)
+    async def ask(self, prompt: str, *, on_event=None) -> BackendResponse:
+        return await _run_codex_thread(self.thread, prompt, on_event)
 
     async def close(self) -> None:
         await self.codex.__aexit__(None, None, None)
@@ -288,6 +329,17 @@ class AntigravityCliBackend:
         self.dangerously_skip_permissions = dangerously_skip_permissions
         self.turn_timeout_seconds = turn_timeout_seconds
 
+    def _tool_policy(self, read_only: bool, tool_policy: str | None) -> str | None:
+        if read_only:
+            if tool_policy not in (None, "read_only"):
+                raise ValueError("read_only conflicts with tool_policy")
+            return "read_only"
+        if tool_policy in SCOPED_POLICIES or tool_policy is None:
+            return tool_policy
+        if tool_policy == "full_access" and self.dangerously_skip_permissions:
+            return tool_policy
+        raise ValueError(f"Antigravity CLI cannot enforce {tool_policy}")
+
     async def run(
         self,
         prompt: str,
@@ -296,13 +348,26 @@ class AntigravityCliBackend:
         reasoning_effort: str | None = None,
         read_only: bool = False,
         tool_policy: str | None = None,
+        on_event=None,
     ) -> BackendResponse:
-        if read_only:
-            raise ValueError("Antigravity CLI cannot enforce read-only tools in headless mode")
-        if tool_policy is not None and not (
-            tool_policy == "full_access" and self.dangerously_skip_permissions
-        ):
-            raise ValueError(f"Antigravity CLI cannot enforce {tool_policy}")
+        policy = self._tool_policy(read_only, tool_policy)
+        if policy in SCOPED_POLICIES:
+            session = None
+            try:
+                async with asyncio.timeout(self.turn_timeout_seconds):
+                    session = await self.open_session(
+                        model, reasoning_effort=reasoning_effort, tool_policy=policy,
+                    )
+                    result = await session.ask(prompt, on_event=on_event)
+                    usage = dict(result.usage or {})
+                    for key, value in (session.probe_usage or {}).items():
+                        usage[key] = usage.get(key, 0) + value
+                    return BackendResponse(result.text, usage or None, {
+                        **(result.details or {}), "policy_probe_usage": session.probe_usage,
+                    })
+            finally:
+                if session is not None:
+                    await session.close()
         command = [self.command, "-p", prompt, "--output-format", "json",
                    "--print-timeout", f"{self.turn_timeout_seconds:g}s"]
         if self.dangerously_skip_permissions:
@@ -375,49 +440,82 @@ class AntigravityCliBackend:
         read_only: bool = False,
         tool_policy: str | None = None,
     ) -> BackendSession:
-        if read_only:
-            raise ValueError("Antigravity CLI cannot enforce read-only tools in headless mode")
-        if tool_policy is not None and not (
-            tool_policy == "full_access" and self.dangerously_skip_permissions
-        ):
-            raise ValueError(f"Antigravity CLI cannot enforce {tool_policy}")
+        policy = self._tool_policy(read_only, tool_policy)
+        scoped = ScopedAgyPolicy(policy, self.workspace) if policy in SCOPED_POLICIES else None
+        if scoped is not None:
+            scoped.__enter__()
         command = [self.command, "--input-format", "stream-json", "--output-format", "stream-json", "--print-timeout", "30m"]
-        if self.dangerously_skip_permissions:
+        if scoped is not None:
+            # Keep project hooks/plugins outside the active customization workspace.
+            # The verified hook replaces CLI prompts; --skip does not bypass hooks.
+            command.extend(["--disable-slash-commands", "--dangerously-skip-permissions"])
+            if policy == "workspace_write":
+                command.extend(["--mode", "accept-edits"])
+        elif self.dangerously_skip_permissions:
             command.append("--dangerously-skip-permissions")
         if model:
             command.extend(["--model", model])
         if reasoning_effort:
             command.extend(["--effort", reasoning_effort])
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            cwd=str(self.workspace),
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            limit=2_000_000,
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                cwd=str(scoped.control if scoped is not None else self.workspace),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                limit=2_000_000,
+                **({"start_new_session": True} if scoped is not None and os.name != "nt" else {}),
+            )
+        except BaseException:
+            if scoped is not None:
+                scoped.__exit__()
+            raise
+        session = _AntigravityCliSession(
+            process, policy=scoped,
+            turn_timeout_seconds=self.turn_timeout_seconds if scoped is not None else 1800,
         )
-        return _AntigravityCliSession(process)
+        if scoped is not None:
+            try:
+                await session.verify_policy()
+            except BaseException:
+                await session.close()
+                raise
+        return session
 
 
 class _AntigravityCliSession:
-    def __init__(self, process: asyncio.subprocess.Process, *, turn_timeout_seconds: float = 1800):
+    def __init__(self, process: asyncio.subprocess.Process, *, turn_timeout_seconds: float = 1800,
+                 policy: ScopedAgyPolicy | None = None):
         self.process = process
         self.turn_timeout_seconds = turn_timeout_seconds
         self.previous_usage: dict[str, int] = {}
         self.stderr_tail = b""
         self.stderr_task = asyncio.create_task(self._drain_stderr())
+        self.policy = policy
+        self.probe_usage = None
+
+    async def verify_policy(self) -> None:
+        async with asyncio.timeout(self.turn_timeout_seconds):
+            result = await self._ask_within_deadline(self.policy.probe_prompt(), policy_probe=True)
+        self.policy.verify_probe()
+        self.probe_usage = result.usage
 
     async def _drain_stderr(self) -> None:
         assert self.process.stderr is not None
         while chunk := await self.process.stderr.read(4096):
             self.stderr_tail = (self.stderr_tail + chunk)[-4000:]
 
-    async def ask(self, prompt: str) -> BackendResponse:
+    async def ask(self, prompt: str, *, on_event=None) -> BackendResponse:
+        if self.policy is not None:
+            prompt = self.policy.task_prompt(prompt)
         try:
             async with asyncio.timeout(self.turn_timeout_seconds):
-                return await self._ask_within_deadline(prompt)
+                return await self._ask_within_deadline(prompt, on_event=on_event)
         except TimeoutError as exc:
-            if self.process.returncode is None:
+            if self.policy is not None:
+                await self.close()
+            elif self.process.returncode is None:
                 try:
                     self.process.kill()
                 except ProcessLookupError:
@@ -428,7 +526,7 @@ class _AntigravityCliSession:
                 f"agy session did not return a result within {self.turn_timeout_seconds:g}s"
             ) from exc
 
-    async def _ask_within_deadline(self, prompt: str) -> BackendResponse:
+    async def _ask_within_deadline(self, prompt: str, *, policy_probe: bool = False, on_event=None) -> BackendResponse:
         if self.process.returncode is not None:
             await self.stderr_task
             authentication_error = _agy_authentication_error(self.stderr_tail)
@@ -436,6 +534,7 @@ class _AntigravityCliSession:
                 raise authentication_error
             raise RuntimeError(f"agy session exited ({self.process.returncode}): {self.stderr_tail.decode(errors='replace')}")
         assert self.process.stdin is not None and self.process.stdout is not None
+        audit_offset = len(self.policy.decisions()) if self.policy is not None else 0
         event = {"event": "user", "message": {"content": prompt}}
         self.process.stdin.write((json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8"))
         await self.process.stdin.drain()
@@ -445,11 +544,23 @@ class _AntigravityCliSession:
             except (json.JSONDecodeError, UnicodeDecodeError) as exc:
                 raise RuntimeError(f"agy session returned invalid JSON: {exc}") from exc
             if payload.get("event") != "result":
+                if on_event is not None:
+                    await on_event({"kind": str(payload.get("event", "activity")), "data": payload})
                 continue
             result = payload.get("result") or {}
             if result.get("status") != "SUCCESS":
                 raise RuntimeError(str(result.get("error") or result.get("status") or "agy session failed"))
-            _check_agy_denials(result)
+            if not policy_probe:
+                if self.policy is not None:
+                    denied = [item["tool"] for item in self.policy.decisions()[audit_offset:]
+                              if item.get("decision") == "deny"]
+                    if denied:
+                        raise AntigravityPermissionDenied(
+                            f"Antigravity task policy {self.policy.policy} denied tools: "
+                            + ", ".join(str(tool) for tool in denied)
+                            + "; the result may be incomplete."
+                        )
+                _check_agy_denials(result)
             response = result.get("response")
             if not isinstance(response, str) or not response.strip():
                 raise RuntimeError(
@@ -462,7 +573,10 @@ class _AntigravityCliSession:
                 for key, value in cumulative.items()
             }
             self.previous_usage = cumulative
-            return BackendResponse(response, delta)
+            details = None
+            if self.policy is not None:
+                details = {"tool_policy": self.policy.policy, "policy_enforcement": "agy_pre_tool_use"}
+            return BackendResponse(response, delta, details)
         await self.stderr_task
         authentication_error = _agy_authentication_error(self.stderr_tail)
         if authentication_error is not None:
@@ -470,14 +584,31 @@ class _AntigravityCliSession:
         raise RuntimeError(f"agy session closed before result: {self.stderr_tail.decode(errors='replace')}")
 
     async def close(self) -> None:
-        if self.process.stdin is not None and not self.process.stdin.is_closing():
-            self.process.stdin.close()
         try:
-            await asyncio.wait_for(self.process.wait(), timeout=5)
-        except asyncio.TimeoutError:
-            self.process.kill()
-            await self.process.wait()
-        await self.stderr_task
+            pid = getattr(self.process, "pid", None)
+            if self.policy is not None and pid is not None and self.process.returncode is None:
+                # Stop descendants before releasing a Windows working directory lock.
+                if os.name == "nt":
+                    await asyncio.to_thread(
+                        subprocess.run, ["taskkill", "/PID", str(pid), "/T", "/F"],
+                        capture_output=True, check=False, timeout=10,
+                    )
+                else:
+                    try:
+                        os.killpg(pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+            if self.process.stdin is not None and not self.process.stdin.is_closing():
+                self.process.stdin.close()
+            try:
+                await asyncio.wait_for(self.process.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                self.process.kill()
+                await self.process.wait()
+            await self.stderr_task
+        finally:
+            if self.policy is not None:
+                self.policy.__exit__()
 
 
 def default_agy_python() -> Path:

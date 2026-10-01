@@ -85,6 +85,35 @@ class PolicyEchoBackend(EchoBackend):
 
 
 class BridgeProtocolTest(unittest.IsolatedAsyncioTestCase):
+    async def test_identity_reports_enforceable_policies_without_an_agent_turn(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            profile = AgentProfile.from_mapping({
+                "id": "local", "runtime": "opencode", "provider": "ollama",
+                "workspace": folder, "default_model": "test", "allowed_models": ["test"],
+                "max_tool_policy": "read_only", "default_tool_policy": "read_only",
+            })
+            cases = (
+                (CodexBackend(root), ["read_only", "workspace_write", "full_access"], "workspace_write"),
+                (AntigravityCliBackend(root), ["no_tools", "read_only", "workspace_write"], None),
+                (AntigravityCliBackend(root, dangerously_skip_permissions=True),
+                 ["no_tools", "read_only", "workspace_write", "full_access"], "full_access"),
+                (ProfiledBackend(profile, object()), ["no_tools", "read_only"], "read_only"),
+            )
+            for backend, policies, default in cases:
+                with self.subTest(backend=type(backend).__name__, policies=policies):
+                    app = make_app("test", backend, "http://127.0.0.1:8765")
+                    async with httpx.AsyncClient(
+                        transport=httpx.ASGITransport(app=app), base_url="http://test",
+                    ) as http:
+                        result = (await http.get("/bridge/identity")).json()
+                    self.assertEqual(result["supported_tool_policies"], policies)
+                    self.assertEqual(result["default_tool_policy"], default)
+                    if isinstance(backend, AntigravityCliBackend) and backend.dangerously_skip_permissions:
+                        self.assertIn("auto-approves all tools", result["tool_policy_notes"])
+                    if isinstance(backend, AntigravityCliBackend):
+                        self.assertEqual(result["tool_policy_enforcement"], "agy_pre_tool_use")
+
     async def test_old_peer_without_identity_requires_restart(self):
         request = httpx.Request("GET", "http://127.0.0.1:8766/bridge/identity")
         response = httpx.Response(404, request=request)
@@ -131,7 +160,7 @@ class BridgeProtocolTest(unittest.IsolatedAsyncioTestCase):
             })
             for backend, supported in (
                 (CodexBackend(Path(folder)), True),
-                (AntigravityCliBackend(Path(folder)), False),
+                (AntigravityCliBackend(Path(folder)), True),
                 (ProfiledBackend(profile, object()), True),
             ):
                 app = make_app("test", backend, "http://127.0.0.1:8765", EchoInfo())

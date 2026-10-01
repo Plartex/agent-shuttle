@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
+import json
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -35,6 +37,7 @@ class BridgeResult:
     text: str
     usage: dict[str, int] | None = None
     details: dict | None = None
+    error: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -43,6 +46,7 @@ class BridgeEvent:
     task_id: str
     state: str | None = None
     text: str = ""
+    data: dict | None = None
 
 
 _TERMINAL_STATES = frozenset({
@@ -65,8 +69,9 @@ class TaskHandle:
 
     async def wait(self, timeout: float | None = None) -> BridgeResult:
         """Wait for a settled task; a wait timeout never cancels execution."""
-        if timeout is not None and timeout < 0:
-            raise ValueError("timeout must be non-negative")
+        if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+                                    or not math.isfinite(timeout) or timeout < 0):
+            raise ValueError("timeout must be finite and non-negative")
         deadline = None if timeout is None else monotonic() + timeout
         last = BridgeResult(self.peer_url, self.task_id, self.context_id,
                             "TASK_STATE_SUBMITTED", "")
@@ -99,6 +104,12 @@ class TaskHandle:
         """Observe live A2A updates; use status() to recover after disconnect."""
         async for event in self.client.task_events(self.peer_url, self.task_id):
             yield event
+
+    async def result_page(self, cursor: int = 0, limit: int = 60000) -> dict:
+        return await self.client.task_result_page(self.peer_url, self.task_id, cursor, limit)
+
+    async def transcript(self, cursor: int = 0, limit: int = 100) -> dict:
+        return await self.client.task_transcript(self.peer_url, self.task_id, cursor, limit)
 
 
 class BridgeClient:
@@ -192,6 +203,9 @@ class BridgeClient:
                 await client.close()
 
     async def _task_call(self, peer_url: str, method: str, request) -> BridgeResult:
+        return _task_result(peer_url, await self._raw_task_call(peer_url, method, request))
+
+    async def _raw_task_call(self, peer_url: str, method: str, request):
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as http:
             client = await create_client(
                 peer_url.rstrip("/"),
@@ -200,12 +214,53 @@ class BridgeClient:
             )
             try:
                 task = await getattr(client, method)(request)
-                return _task_result(peer_url, task)
+                return task
             finally:
                 await client.close()
 
     async def task_status(self, peer_url: str, task_id: str) -> BridgeResult:
         return await self._task_call(peer_url, "get_task", GetTaskRequest(id=task_id))
+
+    async def _get_task(self, peer_url: str, task_id: str):
+        return await self._raw_task_call(peer_url, "get_task", GetTaskRequest(id=task_id))
+
+    async def task_result_page(self, peer_url: str, task_id: str, cursor: int = 0, limit: int = 60000) -> dict:
+        _validate_page(cursor, limit, 60000)
+        result = _task_result(peer_url, await self._get_task(peer_url, task_id))
+        end = min(cursor + limit, len(result.text))
+        return {"task_id": task_id, "state": result.state, "text": result.text[cursor:end],
+                "next_cursor": end if end < len(result.text) else None, "total_size": len(result.text),
+                "usage": result.usage, "details": result.details, "error": result.error}
+
+    async def task_transcript(self, peer_url: str, task_id: str, cursor: int = 0, limit: int = 100) -> dict:
+        _validate_page(cursor, limit, 100)
+        task = await self._get_task(peer_url, task_id)
+        items = [{"kind": "message", "message": MessageToDict(message)} for message in task.history]
+        # Status messages need not be included in history by every A2A peer.
+        if task.status.HasField("message") and not any(message == task.status.message for message in task.history):
+            items.append({"kind": "message", "message": MessageToDict(task.status.message)})
+        items.extend({"kind": "artifact", "artifact": MessageToDict(artifact)} for artifact in task.artifacts)
+        bounded = []
+        for index, item in enumerate(items):
+            encoded = json.dumps(item, ensure_ascii=False)
+            if len(encoded) <= 24000:
+                bounded.append(item)
+            else:
+                for offset in range(0, len(encoded), 12000):
+                    bounded.append({"kind": "json_chunk", "event_index": index, "offset": offset,
+                                    "text": encoded[offset:offset + 12000],
+                                    "last_chunk": offset + 12000 >= len(encoded)})
+        items = bounded
+        end = cursor
+        characters = 0
+        while end < min(cursor + limit, len(items)):
+            size = len(json.dumps(items[end], ensure_ascii=False))
+            if characters + size > 60000:
+                break
+            characters += size
+            end += 1
+        return {"task_id": task_id, "state": TaskState.Name(task.status.state), "items": items[cursor:end],
+                "next_cursor": end if end < len(items) else None, "total_size": len(items)}
 
     async def cancel_task(self, peer_url: str, task_id: str) -> BridgeResult:
         try:
@@ -228,13 +283,15 @@ class BridgeClient:
                     which = item.WhichOneof("payload")
                     if which == "task":
                         yield BridgeEvent("task", task_id,
-                                          TaskState.Name(item.task.status.state))
+                                          TaskState.Name(item.task.status.state), data=MessageToDict(item.task))
                     elif which == "status_update":
                         status = item.status_update.status
                         yield BridgeEvent("status", task_id, TaskState.Name(status.state),
-                                          _parts(status.message.parts) if status.HasField("message") else "")
+                                          _parts(status.message.parts) if status.HasField("message") else "",
+                                          MessageToDict(item.status_update))
                     elif which == "artifact_update":
-                        yield BridgeEvent("artifact", task_id, text=_parts(item.artifact_update.artifact.parts))
+                        yield BridgeEvent("artifact", task_id, text=_parts(item.artifact_update.artifact.parts),
+                                          data=MessageToDict(item.artifact_update))
             finally:
                 await client.close()
 
@@ -346,6 +403,12 @@ def _parts(parts) -> str:
     return "\n".join(part.text for part in parts if part.WhichOneof("content") == "text")
 
 
+def _validate_page(cursor, limit, maximum):
+    if (isinstance(cursor, bool) or not isinstance(cursor, int) or cursor < 0
+            or isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= maximum):
+        raise ValueError(f"cursor must be a non-negative integer; limit must be between 1 and {maximum}")
+
+
 def _request_message(prompt, model, reasoning_effort, read_only, tool_policy, session_id,
                      request_id=None):
     if not isinstance(prompt, str) or not prompt.strip():
@@ -404,4 +467,9 @@ def _task_result(peer_url, task) -> BridgeResult:
                 details = candidate_details
     if not content and task.status.HasField("message"):
         content = _parts(task.status.message.parts)
-    return BridgeResult(peer_url, task.id, task.context_id, state, content, usage, details)
+    metadata = MessageToDict(task.metadata)
+    error = metadata.get("agent_bridge.error")
+    if not isinstance(error, dict) and task.status.HasField("message"):
+        error = MessageToDict(task.status.message.metadata).get("agent_bridge.error")
+    return BridgeResult(peer_url, task.id, task.context_id, state, content, usage, details,
+                        error if isinstance(error, dict) else None)

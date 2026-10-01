@@ -5,13 +5,15 @@ import unittest
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
 
 from agent_bridge.backends import (
-    AntigravityAuthenticationError, AntigravityCliBackend,
+    AntigravityAuthenticationError, AntigravityCliBackend, AntigravityPermissionDenied,
     AntigravitySdkBackend, CodexBackend,
     _AntigravityCliSession, _decode_agy_result, _decode_agy_usage,
+    _run_codex_thread,
 )
+from agent_bridge.agy_policy import ScopedAgyPolicy
 
 
 class AntigravityCliBackendTests(unittest.TestCase):
@@ -190,26 +192,113 @@ class AntigravitySessionTests(unittest.IsolatedAsyncioTestCase):
             await session.ask("hello")
         self.assertEqual(process.returncode, -9)
 
-    async def test_read_only_is_rejected_before_starting_cli(self):
+    async def test_scoped_task_is_not_dispatched_without_a_verified_policy_probe(self):
+        with tempfile.TemporaryDirectory() as folder:
+            backend = AntigravityCliBackend(Path(folder))
+            process = _FakeProcess([{"event": "result", "result": {
+                "status": "SUCCESS", "response": "READY",
+            }}])
+            with patch("agent_bridge.backends.asyncio.create_subprocess_exec", return_value=process) as spawn:
+                with self.assertRaisesRegex(RuntimeError, "policy probe"):
+                    await backend.run("inspect", read_only=True)
+            self.assertEqual(len(process.stdin.lines), 1)
+            self.assertNotIn("inspect", json.loads(process.stdin.lines[0])["message"]["content"])
+            self.assertFalse(Path(spawn.call_args.kwargs["cwd"]).exists())
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows process tree cleanup")
+    async def test_scoped_timeout_stops_tree_before_root_exit_and_removes_control_directory(self):
+        class StalledProcess(_FakeProcess):
+            pid = 12345
+
+            def __init__(self):
+                super().__init__([])
+                self.stdout = asyncio.StreamReader()
+                self.stderr = asyncio.StreamReader()
+                self.stopped = asyncio.Event()
+
+            async def wait(self):
+                await self.stopped.wait()
+                return self.returncode
+
+            def kill(self):
+                self.returncode = -9
+                self.stdout.feed_eof()
+                self.stderr.feed_eof()
+                self.stopped.set()
+
+        with tempfile.TemporaryDirectory() as folder, ScopedAgyPolicy("read_only", Path(folder)) as policy:
+            process = StalledProcess()
+            session = _AntigravityCliSession(process, policy=policy, turn_timeout_seconds=0.01)
+            loop = asyncio.get_running_loop()
+
+            def stop_tree(argv, **kwargs):
+                self.assertIsNone(process.returncode)
+                self.assertEqual(argv, ["taskkill", "/PID", "12345", "/T", "/F"])
+                loop.call_soon_threadsafe(process.kill)
+
+            with patch("agent_bridge.backends.subprocess.run", side_effect=stop_tree) as stop:
+                with self.assertRaisesRegex(TimeoutError, "agy session"):
+                    await session.ask("hello")
+            stop.assert_called_once()
+            self.assertFalse(policy.control.exists())
+
+    async def test_scoped_denial_is_reported_from_hook_audit_even_when_cli_reports_success(self):
+        with tempfile.TemporaryDirectory() as folder:
+            for native_denials in ([], [{"display_name": "WriteToFile"}]):
+                with self.subTest(native_denials=native_denials), ScopedAgyPolicy("read_only", Path(folder)) as policy:
+                    process = _FakeProcess([{"event": "result", "result": {
+                        "status": "SUCCESS", "response": "done", "denied_actions": native_denials,
+                    }}])
+
+                    async def drain():
+                        policy.audit.write_text(json.dumps({
+                            "tool": "write_to_file", "decision": "deny",
+                        }) + "\n", encoding="utf-8")
+
+                    process.stdin.drain = drain
+                    session = _AntigravityCliSession(process, policy=policy)
+                    try:
+                        with self.assertRaisesRegex(AntigravityPermissionDenied, "task policy read_only denied tools: write_to_file"):
+                            await session.ask("try to write")
+                    finally:
+                        await session.close()
+
+    async def test_unknown_and_conflicting_tool_policies_are_rejected_before_starting_cli(self):
         with tempfile.TemporaryDirectory() as folder:
             backend = AntigravityCliBackend(Path(folder))
             with patch("agent_bridge.backends.asyncio.create_subprocess_exec") as spawn:
-                with self.assertRaisesRegex(ValueError, "read-only"):
-                    await backend.run("inspect", read_only=True)
-                with self.assertRaisesRegex(ValueError, "read-only"):
-                    await backend.open_session(read_only=True)
+                with self.assertRaisesRegex(ValueError, "unknown"):
+                    await backend.run("inspect", tool_policy="unknown")
+                with self.assertRaisesRegex(ValueError, "conflicts"):
+                    await backend.open_session(read_only=True, tool_policy="workspace_write")
             spawn.assert_not_called()
 
-    async def test_unenforceable_tool_policies_are_rejected_before_starting_cli(self):
+    async def test_scoped_policies_replace_cli_prompts_with_a_verified_gate(self):
         with tempfile.TemporaryDirectory() as folder:
-            backend = AntigravityCliBackend(Path(folder))
-            with patch("agent_bridge.backends.asyncio.create_subprocess_exec") as spawn:
-                for policy in ("no_tools", "read_only", "workspace_write"):
-                    with self.subTest(policy=policy), self.assertRaisesRegex(ValueError, policy):
-                        await backend.run("inspect", tool_policy=policy)
-                    with self.subTest(policy=policy), self.assertRaisesRegex(ValueError, policy):
-                        await backend.open_session(tool_policy=policy)
-            spawn.assert_not_called()
+            backend = AntigravityCliBackend(Path(folder), dangerously_skip_permissions=True)
+            for policy in ("no_tools", "read_only", "workspace_write"):
+                async def spawn(*argv, **kwargs):
+                    control = Path(kwargs["cwd"])
+                    config = json.loads((control / ".agents" / "hooks.json").read_text())
+                    self.assertTrue(config)
+                    (control / "decisions.jsonl").write_text(json.dumps({
+                        "tool": "write_to_file", "decision": "deny",
+                        "target": str(control / "policy-canary.txt"),
+                    }) + "\n")
+                    self.assertIn("--dangerously-skip-permissions", argv)
+                    self.assertNotIn("--add-dir", argv)
+                    if policy == "workspace_write":
+                        self.assertEqual(argv[argv.index("--mode") + 1], "accept-edits")
+                    return _FakeProcess([
+                        {"event": "result", "result": {"status": "SUCCESS", "response": "READY"}},
+                        {"event": "result", "result": {"status": "SUCCESS", "response": "done"}},
+                    ])
+                with self.subTest(policy=policy), patch(
+                    "agent_bridge.backends.asyncio.create_subprocess_exec", side_effect=spawn,
+                ):
+                    result = await backend.run("inspect", tool_policy=policy)
+                self.assertEqual(result.text, "done")
+                self.assertEqual(result.details["tool_policy"], policy)
 
     async def test_stream_all_permissions_requires_explicit_opt_in(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -249,6 +338,41 @@ class AntigravitySessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(process.stdin.lines[1])["message"]["content"], "two")
         await session.close()
         self.assertTrue(process.stdin.closed)
+
+    async def test_stream_activity_is_reported_before_result(self):
+        process = _FakeProcess([
+            {"event": "message", "message": {"content": "checking code"}},
+            {"event": "result", "result": {"status": "SUCCESS", "response": "done"}},
+        ])
+        seen = []
+
+        async def report(event):
+            seen.append(event)
+
+        session = _AntigravityCliSession(process)
+        try:
+            result = await session.ask("review", on_event=report)
+        finally:
+            await session.close()
+        self.assertEqual(result.text, "done")
+        self.assertEqual(seen[0]["kind"], "message")
+
+    async def test_codex_stream_preserves_final_answer_with_typed_enum_phase(self):
+        from openai_codex.generated.v2_all import MessagePhase, TurnStatus
+        events = [
+            ("item/completed", SimpleNamespace(item=SimpleNamespace(type="agentMessage", text="final", phase=MessagePhase.final_answer))),
+            ("turn/completed", SimpleNamespace(turn=SimpleNamespace(status=TurnStatus.completed, error=None))),
+        ]
+        for _, payload in events:
+            payload.model_dump = lambda **kwargs: {}
+
+        async def stream():
+            for method, payload in events:
+                yield SimpleNamespace(method=method, payload=payload)
+
+        thread = SimpleNamespace(turn=AsyncMock(return_value=SimpleNamespace(stream=stream, interrupt=AsyncMock())))
+        result = await _run_codex_thread(thread, "prompt", AsyncMock())
+        self.assertEqual(result.text, "final")
 
     async def test_stream_rejects_partial_success_when_command_was_denied(self):
         process = _FakeProcess([{"event": "result", "result": {

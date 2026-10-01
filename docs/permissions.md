@@ -34,16 +34,28 @@ Codex is managed through the official `openai-codex` Python SDK, which utilizes 
 
 ### 2. Antigravity CLI
 
+Before delegation, the coordinator chooses the workspace and least sufficient enforceable policy for the task. `get_agent_info` and `/bridge/identity` report `supported_tool_policies` and `default_tool_policy`; `tool_policy_notes` explains additional limitations. The list describes the current server and respects profile limits. Omitting a policy uses the harness default and does not imply read-only access. Never replace an unsupported restrictive policy with `full_access` automatically.
+
+MCP calls to Codex and Antigravity default to `read_only`. The caller selects `workspace_write` when the user requests file edits; this guidance is delivered in MCP server instructions and tool descriptions, independently of a local `AGENTS.md` or caller account. Configured profiles retain their own default. An incompatible running peer is left intact while MCP starts a fresh peer for the requested workspace and policy.
+
 Antigravity executes via the official `agy` CLI in headless mode (`-p` / `stream-json`):
 
 - **Default Permission Mode (`settings`)**:
   - The CLI respects scoped permission rules defined in the user's `~/.gemini/antigravity-cli/settings.json`.
   - **Headless Confirmation Limitation:** In headless mode, the CLI cannot interactively ask the user for approval. Consequently, actions governed by `ask` or `deny` rules are rejected immediately. Rule precedence is `deny` > `ask` > `allow`.
   - **Soft-Denial Detection:** When a tool call is denied, `agy` may exit with return code 0 and emit `status: SUCCESS` with `denied_actions` or an empty response body. Agent Shuttle inspects the output JSON and raises `AntigravityPermissionDenied` or `RuntimeError` rather than returning a misleading empty or truncated response.
+- **Scoped `no_tools`, `read_only`, and `workspace_write`**:
+  - Agent Shuttle starts a stream session from a temporary control workspace containing its own `PreToolUse` hook. The project is accessed through exact resource grants, without loading the project's hooks into the active workspace. User-wide Antigravity settings are not changed.
+  - Before sending the real task, Shuttle requests a disposable canary write with all tools blocked and verifies the hook's recorded denial. If this probe is absent or fails, the real task is not sent. The same process then receives the selected scoped policy.
+  - `no_tools` denies every agent tool. `read_only` allows native `view_file`, `list_dir`, `find_by_name`, and `grep_search` within the project. `workspace_write` additionally permits native file creation/replacement there, with `accept-edits` enabled behind the hook.
+  - Shell, MCP, subagents, permission changes, unknown tools, and external paths are denied. Writes to control directories such as `.git` and `.agents`, and edits through hard links, are denied. The coordinator runs required test commands in its own approved environment.
+  - Scoped sessions disable the CLI's interactive permission prompts with `--dangerously-skip-permissions`; this flag does not bypass `PreToolUse`. The verified hook supplies the access boundary, so native approvals need no user allowlist. Hook errors block execution. This is a verified tool gate, not an OS sandbox, and it relies on the installed CLI and trusted user-wide runtime customizations.
+  - The canary check requires an extra model turn; one-shot usage includes that overhead, also reported as `policy_probe_usage`. Temporary controls are removed after terminating the session's process tree.
 - **`full_access` (`all` mode)**:
   - Enabled by starting the server with `--agy-dangerously-skip-permissions` or passing `HarnessLaunch(tool_policy="full_access")`.
-  - Passes `--dangerously-skip-permissions` to all CLI calls on that server.
-- **`read_only` & `no_tools`**: **Unsupported.** Antigravity CLI does not provide a guaranteed sandbox or read-only flag in headless mode. Agent Shuttle explicitly rejects `read_only` and `no_tools` to prevent a false sense of security.
+  - Unscoped full-access calls use the CLI's all-permissions flag without a scoped hook. Scoped calls always use their task hook, including on servers configured for full access.
+
+The direct Python/A2A API preserves legacy `tool_policy=None` behavior: native Antigravity settings apply, and workspace writes may be allowed. A `permissions.allow` list, planning mode, and a Git worktree do not enforce read-only access. Use an explicit scoped policy for those calls.
 
 ### 3. OpenCode
 
@@ -102,9 +114,9 @@ Each profile specifies a `max_tool_policy`:
 
 ---
 
-## Safe Configuration of Antigravity Settings
+## Legacy Antigravity Settings
 
-If you require partial tool execution for Antigravity without giving total system access (`full_access`), configure granular rules in your personal `~/.gemini/antigravity-cli/settings.json`:
+Scoped task policies do not require changes to Antigravity settings. For legacy calls with `tool_policy=None`, granular rules can be configured in your personal `~/.gemini/antigravity-cli/settings.json`; an allowlist alone does not establish a read-only boundary:
 
 ```json
 {

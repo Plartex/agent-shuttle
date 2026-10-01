@@ -6,6 +6,7 @@ from .discovery import discover_harnesses
 from .managed import BridgeConnection, HarnessLaunch, connect_harness
 from .profiles import AgentProfile, ToolPolicy
 from .registry import build_profile
+from .task_store import SQLiteTaskStore
 
 __all__ = [
     "BridgeClient",
@@ -22,4 +23,5 @@ __all__ = [
     "AgentProfile",
     "ToolPolicy",
     "build_profile",
+    "SQLiteTaskStore",
 ]

@@ -1,6 +1,7 @@
 /.venv/
 /.venv-agy/
 /.runtime/
+/.agent-shuttle/
 /build/
 /bin/
 /.agents/mcp_config.json

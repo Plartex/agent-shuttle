@@ -27,6 +27,9 @@ def main() -> None:
     serve.add_argument("--profile", type=Path, help="JSON profile for OpenCode or Claude Code")
     serve.add_argument("--workspace", type=Path, help="Project directory; overrides profile workspace")
     serve.add_argument("--port", type=int, required=True)
+    serve.add_argument("--task-db", type=Path, help="Persist tasks and request bindings in this SQLite file")
+    serve.add_argument("--execution-timeout-seconds", type=float, default=1800)
+    serve.add_argument("--stall-timeout-seconds", type=float, default=1800)
     serve.add_argument("--agy-command", default=os.environ.get("BRIDGE_AGY_COMMAND", "agy"))
     serve.add_argument("--agy-mode", choices=["cli", "sdk"], default="cli")
     serve.add_argument("--agy-python", type=Path)
@@ -108,7 +111,13 @@ def main() -> None:
         )
         info_provider = AntigravityCliInfo(workspace, args.agy_command)
     url = f"http://127.0.0.1:{args.port}"
-    uvicorn.run(make_app(name, backend, url, info_provider), host="127.0.0.1", port=args.port)
+    store = None
+    if args.task_db is not None:
+        from .task_store import SQLiteTaskStore
+        store = SQLiteTaskStore(args.task_db)
+    uvicorn.run(make_app(name, backend, url, info_provider, task_store=store,
+                         execution_timeout_seconds=args.execution_timeout_seconds,
+                         stall_timeout_seconds=args.stall_timeout_seconds), host="127.0.0.1", port=args.port)
 
 
 if __name__ == "__main__":

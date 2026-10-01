@@ -113,5 +113,5 @@ Stateful conversations are governed by `SessionManager` in `agent_bridge/a2a_ser
 ## Threat Model & Local Security
 
 - **Loopback Boundary:** Agent Shuttle relies on OS-level network loopback isolation (`127.0.0.1`). Any process running under any user account on the local machine can connect to an open A2A port.
-- **In-Memory Store:** The A2A task store (`InMemoryTaskStore`) is kept entirely in memory and cleared on server termination. No task artifacts or prompts are persisted in an unencrypted database.
+- **Task Storage:** Standalone A2A servers use `InMemoryTaskStore` unless `--task-db` is supplied. Managed MCP task peers use SQLite under the target workspace's `.agent-shuttle` directory. Task prompts, history, and artifacts are stored there without encryption; protect the workspace accordingly. Only one server may own a task database at a time. After restart, finished tasks remain readable and interrupted tasks become failed without replaying their side effects.
 - **Sandbox Limits:** Tool policies (`read_only`, `workspace_write`) constrain agent actions through the harness's internal policy engine or sandbox. They are not an operating system container (like Docker or Firejail). If total isolation from the host filesystem is required, run Agent Shuttle inside an external container.

@@ -47,14 +47,14 @@ client = ShuttleClient(timeout_seconds: float = 1800)
   - `read_only`: Устаревший булев флаг только для чтения (сохранен для совместимости).
   - `tool_policy`: Политика инструментов: `"no_tools"`, `"read_only"`, `"workspace_write"` или `"full_access"`.
   - `session_id`: Идентификатор UUID для продолжения существующей сессии.
-  - `request_id`: Необязательный UUID для защиты повторной отправки в течение жизни сервера. Повтор с другими аргументами отклоняется.
+  - `request_id`: Необязательный UUID для защиты повторной отправки. При `--task-db` привязка переживает перезапуск сервера. Повтор с другими аргументами отклоняется.
   - Возвращает: `BridgeResult`.
 
 - **`async def submit(..., request_id: str | None = None) -> TaskHandle`**
   Принимает те же настройки, что `ask()`, и возвращается сразу после создания задачи A2A. Прекращение ожидания вызывающим кодом не отменяет отправленную задачу.
 
 - **`task(peer_url: str, task_id: str) -> TaskHandle`**
-  Восстанавливает доступ к задаче по ID, пока работает тот же экземпляр сервера.
+  Восстанавливает доступ к задаче по ID. При `--task-db` сохранённая задача доступна и после перезапуска сервера.
 
 - **`task_status(peer_url, task_id)` / `cancel_task(peer_url, task_id)`**
   Получают текущее состояние задачи A2A или запрашивают её отмену.
@@ -66,7 +66,7 @@ client = ShuttleClient(timeout_seconds: float = 1800)
   Возвращает полный снимок: каталог моделей, уровни рассуждений и группы квот аккаунта в реальном времени.
 
 - **`async def identity(peer_url: str) -> dict`**  
-  Легковесный запрос идентификации: `agent`, `backend`, фактический `pid` серверного процесса, `workspace`, `read_only_tools`, `max_tool_policy`, `agy_permission_mode` и `agy_turn_timeout_seconds`. **Не запускает** исполняемые файлы моделей и CLI.
+  Легковесный запрос идентификации: `agent`, `backend`, фактический `pid` серверного процесса, `workspace`, `read_only_tools`, `supported_tool_policies`, `default_tool_policy`, `max_tool_policy`, `agy_permission_mode` и `agy_turn_timeout_seconds`. Antigravity также сообщает `tool_policy_enforcement` и `tool_policy_notes`. **Не запускает** исполняемые файлы моделей и CLI.
 
 - **`async def capabilities(peer_url: str) -> dict`**  
   Возвращает список моделей, текущую выбранную модель, параметры рассуждений и предел политик инструментов.
@@ -93,7 +93,7 @@ if snapshot.state == "TASK_STATE_WORKING":
 # cancelled = await handle.cancel()
 ```
 
-`status()` возвращает снимок `BridgeResult`. Если срок `wait(timeout)` истёк, метод возвращает последний снимок; `result()` ждёт терминального состояния или запроса ввода. `events()` выдаёт живые события `BridgeEvent(kind, task_id, state, text)`; после обрыва потока вызовите `status()` для получения достоверного состояния. Повторный `cancel()` уже отменённой задачи возвращает её статус. Сейчас задачи хранятся **в памяти**: ID и привязки `request_id` не переживают перезапуск сервера. Отмена шага постоянной сессии закрывает её нативную сессию; для продолжения создайте новую.
+`status()` возвращает снимок `BridgeResult`. Если конечный неотрицательный срок `wait(timeout)` истёк, метод возвращает последний снимок; `result()` ждёт терминального состояния или запроса ввода. `result_page(cursor, limit)` читает до 60 000 символов ответа, `transcript(cursor, limit)` — до 100 элементов истории и артефактов с ограничением 60 000 символов на страницу. Для продолжения используйте `next_cursor`. `events()` выдаёт живые события `BridgeEvent(kind, task_id, state, text, data)`; после обрыва потока вызовите `status()`. Повторный `cancel()` уже отменённой задачи возвращает её статус. Обычный A2A-сервер хранит задачи в памяти, если не задан `--task-db`. После перезапуска незавершённые задачи получают состояние failed с ошибкой прерывания и не запускаются повторно. Отмена шага постоянной сессии закрывает её нативную сессию; для продолжения создайте новую.
 
 ---
 
@@ -111,6 +111,7 @@ class BridgeResult:
     text: str
     usage: dict[str, int] | None = None
     details: dict | None = None
+    error: dict | None = None
 ```
 
 - `state`: Имя состояния задачи (например, `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED`, `message`).
@@ -234,7 +235,7 @@ def discover_harnesses(commands: dict[str, str] | None = None) -> dict[str, str]
 
 ```powershell
 # Запуск Codex
-agent-shuttle serve codex --port 8765 [--workspace <КАТАЛОГ>]
+agent-shuttle serve codex --port 8765 [--workspace <КАТАЛОГ>] [--task-db <ФАЙЛ>]
 
 # Запуск Antigravity CLI
 agent-shuttle serve antigravity --port 8766 [--workspace <КАТАЛОГ>] `
@@ -245,6 +246,8 @@ agent-shuttle serve antigravity --port 8766 [--workspace <КАТАЛОГ>] `
 # Запуск OpenCode или Claude Code из профиля
 agent-shuttle serve profile --profile .\profile.json --port 8767 [--workspace <КАТАЛОГ>]
 ```
+
+`--task-db` включает хранение задач и `request_id` в SQLite. `--execution-timeout-seconds` (по умолчанию 1800) ограничивает весь шаг, `--stall-timeout-seconds` (по умолчанию 1800) — паузу между событиями прогресса. Для задач через MCP управляемый A2A-сервер использует SQLite автоматически.
 
 ### `agent-shuttle ask`
 
@@ -287,6 +290,7 @@ agent-shuttle-mcp
 
 - `BRIDGE_WORKSPACE`: Каталог проекта для временных серверов. Если не задан, используется рабочий каталог MCP-процесса; инструментам также можно передать `workspace`.
 - `BRIDGE_CODEX_URL` и `BRIDGE_ANTIGRAVITY_URL`: Необязательные локальные адреса. Если подходящий сервер не запущен, MCP запускает его на время запроса.
+- `BRIDGE_TASK_REGISTRY`: Необязательный путь к реестру задач MCP (по умолчанию `<BRIDGE_WORKSPACE>/.agent-shuttle/mcp-tasks.json`). Базы A2A-серверов находятся в `.agent-shuttle` целевого рабочего каталога.
 - `BRIDGE_AGENTS_JSON`: Необязательные параметры запуска для произвольных идентификаторов агентов. Для встроенного идентификатора по-прежнему допустима строка URL:
   ```json
   {"opencode-local": {"harness": "opencode", "profile": "C:/profiles/opencode.json", "url": "http://127.0.0.1:8767"}}
@@ -312,3 +316,12 @@ agent-shuttle-mcp
 
 6. **`get_codex_info()`**  
    Возвращает каталог моделей и лимиты квот Codex через `account/rateLimits/read`.
+
+7. **`submit_task(agent_id, prompt, model?, reasoning_effort?, tool_policy?, workspace?, request_id?)`**
+   Сразу возвращает `task_id` и оставляет управляемый A2A-сервер запущенным между вызовами. При неясном исходе отправки повторите её с тем же UUID `request_id`.
+
+8. **`check_task(task_id)` / `wait_task(task_id, timeout_seconds=180)` / `cancel_task(task_id)`**
+   Проверяют состояние, ждут с отдельным лимитом времени или явно отменяют задачу. Истечение времени ожидания не останавливает исполнение.
+
+9. **`get_result(task_id, cursor=0, limit=60000)` / `get_transcript(task_id, cursor=0, limit=100)`**
+   Читают ответ и историю страницами; продолжайте по `next_cursor` до `null`. Сохранённые результаты доступны после перезапуска MCP; прерванная работа получает состояние failed.
