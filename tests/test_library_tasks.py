@@ -258,6 +258,24 @@ class LibraryTasksTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("progress", kinds)
             self.assertEqual(kinds[-1], "completed")
 
+    async def test_large_event_can_be_paged_without_oversized_transcript(self):
+        class LargeEventBackend(FakeBackend):
+            async def run(self, prompt, *args, on_event=None, **kwargs):
+                await on_event({"kind": "large", "text": "x" * 70000})
+                return "done"
+
+        async with TaskManager({"fake": LargeEventBackend()}, workspace=self.root,
+                               database=self.database) as manager:
+            task = await manager.dispatch("fake", "hello")
+            await task.result()
+            page = await task.transcript()
+            self.assertLess(len(str(page)), 65000)
+            event = next(item for item in page["items"] if item["kind"] == "large")
+            self.assertTrue(event["data_truncated"])
+            first = await task.event_page(event["seq"], limit=60000)
+            second = await task.event_page(event["seq"], cursor=first["next_cursor"])
+            self.assertIn("x" * 70000, first["text"] + second["text"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -95,6 +95,9 @@ class Task:
     async def transcript(self, cursor: int = 0, limit: int = 100) -> dict:
         return await self.manager.transcript(self.id, cursor, limit)
 
+    async def event_page(self, seq: int, cursor: int = 0, limit: int = 60000) -> dict:
+        return await self.manager.event_page(self.id, seq, cursor, limit)
+
     async def events(self, cursor: int = 0):
         """Replay journal entries and follow new events until the task is terminal."""
         while True:
@@ -486,11 +489,45 @@ class TaskManager:
             "SELECT seq, timestamp, kind, data FROM events WHERE task_id=? AND seq>=? ORDER BY seq LIMIT ?",
             (task_id, cursor, limit),
         ).fetchall()
-        items = [{"seq": row["seq"], "timestamp": row["timestamp"], "kind": row["kind"],
-                  "data": json.loads(row["data"])} for row in rows]
+        items = []
+        remaining = 60000
+        for row in rows:
+            data = row["data"]
+            overhead = len(row["kind"]) + 200
+            if len(data) + overhead > remaining:
+                if remaining < 500 and items:
+                    break
+                preview_size = max(0, remaining - overhead - 200)
+                item_data = {"preview": data[:preview_size], "truncated": True}
+                truncated = True
+            else:
+                item_data = json.loads(data)
+                truncated = False
+            items.append({"seq": row["seq"], "timestamp": row["timestamp"],
+                          "kind": row["kind"], "data": item_data,
+                          "data_truncated": truncated})
+            remaining -= min(len(data), max(0, remaining - overhead)) + overhead
+            if remaining < 500:
+                break
         total = self._db().execute("SELECT COUNT(*) FROM events WHERE task_id=?", (task_id,)).fetchone()[0]
-        next_cursor = rows[-1]["seq"] + 1 if rows and rows[-1]["seq"] + 1 < total else None
+        next_cursor = items[-1]["seq"] + 1 if items and items[-1]["seq"] + 1 < total else None
         return {"task_id": task_id, "items": items, "next_cursor": next_cursor, "total_size": total}
+
+    async def event_page(self, task_id: str, seq: int, cursor: int = 0,
+                         limit: int = 60000) -> dict:
+        self._page(cursor, limit, 60000)
+        if type(seq) is not int or seq < 0:
+            raise ValueError("seq must be nonnegative")
+        self._row(task_id)
+        row = self._db().execute("SELECT data FROM events WHERE task_id=? AND seq=?",
+                                 (task_id, seq)).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown event {seq} for task {task_id}")
+        data = row["data"]
+        end = min(cursor + limit, len(data))
+        return {"task_id": task_id, "seq": seq, "text": data[cursor:end],
+                "next_cursor": end if end < len(data) else None,
+                "total_size": len(data)}
 
     async def _update(self, task_id: str, state: str, data: dict | None = None,
                       *, text: str | None = None, usage: dict | None = None,
