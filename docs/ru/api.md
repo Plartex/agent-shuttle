@@ -12,6 +12,13 @@
 
 ```python
 from agent_shuttle import (
+    TaskManager,
+    Task,
+    TaskStatus,
+    TaskResult,
+    Session,
+    SessionInfo,
+    AgentInfo,
     ShuttleClient,
     BridgeResult,
     BridgeEvent,
@@ -28,6 +35,26 @@ from agent_shuttle import (
     AntigravityAuthenticationError,
 )
 ```
+
+### `TaskManager`: задачи на уровне библиотеки
+
+`TaskManager` запускает агента напрямую из Python, без HTTP- или MCP-сервера. Менеджер должен оставаться открытым, пока работают задачи:
+
+```python
+from agent_shuttle import TaskManager
+
+async with TaskManager.for_workspace(project_dir) as manager:
+    task = await manager.dispatch("codex", "Проверь README", tool_policy="read_only")
+    status = await task.wait(timeout=30)  # Истечение ожидания не отменяет работу.
+    result = await task.result()
+    print(result.state, result.text, result.usage)
+```
+
+`dispatch()` сразу возвращает `Task`. У объекта есть `status()`, `wait(timeout)`, `result()`, `result_page()`, `transcript()`, асинхронный итератор журнала `events()` и `cancel()`. Задачу можно снова открыть по ID через `manager.get()`, а список получить через `list_tasks()`. Состояния: `submitted`, `working`, `completed`, `failed`, `canceled`. Результат содержит структурированную ошибку, расход токенов, предупреждения, детали и поля модели и изменённых файлов. Фактическая модель остаётся неизвестной, если бэкенд её не сообщает. Изменённые файлы собираются по Git status только при чистом рабочем каталоге до задачи и отсутствии параллельных задач в этом менеджере; иначе статус `unavailable`. Наблюдение Git само по себе не доказывает, какой процесс изменил файл.
+
+`create_session()` создаёт `Session` с методами `dispatch()` и `end()`. `list_sessions()` возвращает их состояние. Параметры модели, effort и политики фиксируются для всей сессии; ходы выполняются по очереди. Сессия Codex с сохранённым ID нативного треда после перезапуска получает статус `suspended` и продолжится при следующем ходе. Если во время сбоя выполнялся ход, сессия всегда становится `interrupted` и требует нового разговора. Бэкенды без проверенной возможности возобновления тоже получают `interrupted`. `reap_idle_sessions()` закрывает неактивные сессии. `list_agents()` показывает базовые возможности, `agent_info()` получает доступный каталог моделей и квоты, а `set_preference()` / `get_preference()` сохраняют настройки по умолчанию.
+
+По умолчанию база SQLite находится в `<workspace>/.agent-shuttle/library-tasks.sqlite3`. Параметры `database=...` и `memory=True` позволяют выбрать путь или хранение в памяти. Завершённые задачи сохраняются после перезапуска, прерванные получают ошибку `worker_interrupted` без повторного выполнения. A2A показывает эти же задачи через свой протокол.
 
 ### `ShuttleClient`
 

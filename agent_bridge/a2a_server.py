@@ -31,6 +31,7 @@ from .backends import (
 from .info import InfoProvider
 from .profiled import ProfiledBackend
 from .profiles import ToolPolicy
+from .task_library import TaskManager
 
 
 @dataclass
@@ -40,10 +41,6 @@ class _SessionRecord:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     last_used: float = field(default_factory=monotonic)
     closed: bool = False
-
-
-class WorkerStalledError(TimeoutError):
-    pass
 
 
 class SessionManager:
@@ -134,12 +131,9 @@ class SessionManager:
 
 
 class BridgeExecutor(AgentExecutor):
-    def __init__(self, backend: Backend, sessions: SessionManager,
-                 execution_timeout_seconds: float = 1800, stall_timeout_seconds: float = 1800):
-        self.backend = backend
-        self.sessions = sessions
-        self.execution_timeout_seconds = execution_timeout_seconds
-        self.stall_timeout_seconds = stall_timeout_seconds
+    def __init__(self, task_manager: TaskManager, agent_id: str):
+        self.task_manager = task_manager
+        self.agent_id = agent_id
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         prompt = get_message_text(context.message).strip()
@@ -221,72 +215,59 @@ class BridgeExecutor(AgentExecutor):
                     new_text_message("session_id must match the A2A context_id"),
                 )
                 return
-        await updater.update_status(TaskState.TASK_STATE_WORKING)
-        started = monotonic()
-        last_activity = started
+        await self._execute_library(task, updater, prompt, model, reasoning_effort,
+                                    tool_policy or ("read_only" if read_only else None), session_id,
+                                    (context.message.metadata["agent_bridge.request_id"]
+                                     if "agent_bridge.request_id" in context.message.metadata else None))
+
+    async def _execute_library(self, task, updater, prompt, model, reasoning_effort,
+                               tool_policy, session_id, request_id):
+        manager = self.task_manager
+        assert manager is not None and self.agent_id is not None
 
         async def on_event(event):
-            nonlocal last_activity
-            last_activity = monotonic()
             message = new_text_message(str(event.get("text", "")) or str(event.get("kind", "activity")))
             message.metadata["agent_bridge.event"] = event
             await updater.update_status(TaskState.TASK_STATE_WORKING, message)
 
-        async def run():
-            if session_id is not None:
-                return await self.sessions.run(session_id, prompt, model, reasoning_effort, read_only,
-                                               tool_policy, on_event=on_event)
-            kwargs = {"reasoning_effort": reasoning_effort, "read_only": read_only}
-            if tool_policy is not None:
-                kwargs["tool_policy"] = tool_policy
-            if "on_event" in inspect.signature(self.backend.run).parameters:
-                kwargs["on_event"] = on_event
-            return await self.backend.run(prompt, model, **kwargs)
-
-        running = asyncio.create_task(run())
         try:
-            while not running.done():
-                now = monotonic()
-                remaining = min(self.execution_timeout_seconds - (now - started),
-                                self.stall_timeout_seconds - (now - last_activity))
-                if remaining <= 0:
-                    if now - started >= self.execution_timeout_seconds:
-                        raise TimeoutError("Worker exceeded its execution budget")
-                    raise WorkerStalledError("Worker exceeded its inactivity budget")
-                await asyncio.wait({running}, timeout=remaining)
-            answer = await running
+            if session_id is not None:
+                await manager.ensure_session(session_id, self.agent_id, model=model,
+                                             reasoning_effort=reasoning_effort, tool_policy=tool_policy)
+            core_task = await manager.dispatch(self.agent_id, prompt, model=model,
+                                               reasoning_effort=reasoning_effort,
+                                               tool_policy=tool_policy, session_id=session_id,
+                                               request_id=request_id, task_id=task.id,
+                                               event_sink=on_event)
         except Exception as exc:
-            running.cancel()
-            await asyncio.gather(running, return_exceptions=True)
-            code = ("worker_stalled" if isinstance(exc, WorkerStalledError) else
-                    "worker_timeout" if isinstance(exc, TimeoutError) else "backend_error")
-            error = {"code": code,
-                     "type": type(exc).__name__, "message": str(exc), "retryable": False}
-            await updater.update_status(
-                TaskState.TASK_STATE_FAILED,
-                new_text_message(f"{type(exc).__name__}: {exc}"),
-                metadata={"agent_bridge.error": error},
-            )
+            error = {"code": "backend_error", "type": type(exc).__name__,
+                     "message": str(exc), "retryable": False}
+            await updater.update_status(TaskState.TASK_STATE_FAILED,
+                                        new_text_message(f"{type(exc).__name__}: {exc}"),
+                                        metadata={"agent_bridge.error": error})
             return
+        await updater.update_status(TaskState.TASK_STATE_WORKING)
+        try:
+            result = await core_task.result()
         except asyncio.CancelledError:
-            running.cancel()
-            await asyncio.gather(running, return_exceptions=True)
+            await core_task.cancel()
             raise
-        metadata = None
-        if isinstance(answer, BackendResponse):
+        if result.state == "completed":
             metadata = {}
-            if answer.usage:
-                metadata["agent_bridge.usage"] = answer.usage
-            if answer.details:
-                metadata["agent_bridge.details"] = answer.details
-            metadata = metadata or None
-            answer = answer.text
-        await updater.add_artifact(
-            [new_text_part(answer, media_type="text/plain")],
-            name="result",
-            metadata=metadata,
-        )
-        await updater.update_status(TaskState.TASK_STATE_COMPLETED)
+            if result.usage:
+                metadata["agent_bridge.usage"] = result.usage
+            if result.details:
+                metadata["agent_bridge.details"] = result.details
+            await updater.add_artifact([new_text_part(result.text, media_type="text/plain")],
+                                       name="result", metadata=metadata or None)
+            await updater.update_status(TaskState.TASK_STATE_COMPLETED)
+        elif result.state == "failed":
+            error = result.error or {"code": "backend_error", "message": "Unknown worker error"}
+            await updater.update_status(TaskState.TASK_STATE_FAILED,
+                                        new_text_message(f"{error.get('type', 'Error')}: {error['message']}"),
+                                        metadata={"agent_bridge.error": error})
+        elif result.state == "canceled":
+            await updater.update_status(TaskState.TASK_STATE_CANCELED)
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
         # The A2A active-task manager cancels and joins the producer after this
@@ -350,7 +331,6 @@ def make_app(name: str, backend: Backend, url: str, info_provider: InfoProvider 
     for budget in (execution_timeout_seconds, stall_timeout_seconds):
         if isinstance(budget, bool) or not isinstance(budget, (int, float)) or not math.isfinite(budget) or budget <= 0:
             raise ValueError("worker budgets must be positive finite numbers")
-    sessions = SessionManager(backend)
     skill = AgentSkill(
         id=f"run_{name}",
         name=f"Run {name} task",
@@ -376,8 +356,19 @@ def make_app(name: str, backend: Backend, url: str, info_provider: InfoProvider 
         supported_interfaces=[AgentInterface(protocol_binding="JSONRPC", url=url, protocol_version="1.0")],
         skills=[skill],
     )
+    library_database = getattr(task_store, "path", None)
+    if isinstance(library_database, Path):
+        library_database = library_database.with_suffix(".library.sqlite3")
+    backend_workspace = getattr(backend, "workspace", None)
+    if not isinstance(backend_workspace, (str, Path)):
+        backend_workspace = Path.cwd()
+    manager = TaskManager({name: backend}, workspace=backend_workspace,
+                          database=library_database, memory=library_database is None,
+                          execution_timeout_seconds=execution_timeout_seconds,
+                          stall_timeout_seconds=stall_timeout_seconds)
+    executor = BridgeExecutor(manager, name)
     handler = _IdempotentRequestHandler(
-        agent_executor=BridgeExecutor(backend, sessions, execution_timeout_seconds, stall_timeout_seconds),
+        agent_executor=executor,
         task_store=task_store or InMemoryTaskStore(),
         agent_card=card,
     )
@@ -457,7 +448,11 @@ def make_app(name: str, backend: Backend, url: str, info_provider: InfoProvider 
             session_id = str(uuid.UUID(request.path_params["session_id"]))
         except ValueError:
             return JSONResponse({"error": "session_id must be a UUID"}, status_code=400)
-        return JSONResponse({"closed": await sessions.close(session_id)})
+        try:
+            closed = await manager.end_session(session_id)
+        except KeyError:
+            closed = False
+        return JSONResponse({"closed": closed})
 
     @asynccontextmanager
     async def lifespan(app):
@@ -467,15 +462,16 @@ def make_app(name: str, backend: Backend, url: str, info_provider: InfoProvider 
         async def reap_loop():
             while True:
                 await asyncio.sleep(60)
-                await sessions.reap_idle()
+                await manager.reap_idle_sessions()
 
         janitor = None
         try:
             recover = getattr(handler.task_store, "recover_interrupted", None)
             if recover is not None:
                 await recover()
-            janitor = asyncio.create_task(reap_loop())
-            yield
+            async with manager:
+                janitor = asyncio.create_task(reap_loop())
+                yield
         finally:
             try:
                 if janitor is not None:
@@ -485,7 +481,6 @@ def make_app(name: str, backend: Backend, url: str, info_provider: InfoProvider 
                     except asyncio.CancelledError:
                         pass
                 await handler._active_task_registry.aclose()
-                await sessions.close_all()
                 shutdown = getattr(backend, "close", None)
                 if shutdown is not None:
                     await shutdown()
@@ -494,7 +489,7 @@ def make_app(name: str, backend: Backend, url: str, info_provider: InfoProvider 
                 if close_store is not None:
                     close_store()
 
-    return Starlette(
+    app = Starlette(
         lifespan=lifespan,
         routes=[
             Route("/bridge/identity", bridge_identity),
@@ -506,3 +501,5 @@ def make_app(name: str, backend: Backend, url: str, info_provider: InfoProvider 
             *create_jsonrpc_routes(handler, "/"),
         ]
     )
+    app.state.task_manager = manager
+    return app

@@ -12,6 +12,13 @@ Import public symbols directly from `agent_shuttle`:
 
 ```python
 from agent_shuttle import (
+    TaskManager,
+    Task,
+    TaskStatus,
+    TaskResult,
+    Session,
+    SessionInfo,
+    AgentInfo,
     ShuttleClient,
     BridgeResult,
     BridgeEvent,
@@ -28,6 +35,26 @@ from agent_shuttle import (
     AntigravityAuthenticationError,
 )
 ```
+
+### `TaskManager` library API
+
+`TaskManager` owns execution and durable state directly. It does not launch a local HTTP or MCP server. Keep the manager open while its tasks run:
+
+```python
+from agent_shuttle import TaskManager
+
+async with TaskManager.for_workspace(project_dir) as manager:
+    task = await manager.dispatch("codex", "Review the README", tool_policy="read_only")
+    snapshot = await task.wait(timeout=30)  # A wait timeout never cancels the worker.
+    result = await task.result()
+    print(result.state, result.text, result.usage)
+```
+
+`dispatch(agent_id, prompt, *, model, reasoning_effort, tool_policy, session_id, request_id)` returns a `Task` immediately. `get(task_id)` reopens it; `list_tasks(session_id=...)` lists snapshots. `Task` provides `status()`, `wait(timeout)`, `result()`, `result_page(cursor, limit)`, `transcript(cursor, limit)`, an async `events(cursor=0)` journal iterator, and idempotent `cancel()`. State values are `submitted`, `working`, `completed`, `failed`, and `canceled`. `TaskResult` includes structured error, usage, details, warnings, requested and observed model fields, and changed-file status. The observed model remains unknown when a backend does not report it. Changed files are collected from Git status only when the workspace was clean at task start and no other task ran concurrently in this manager; otherwise the status is `unavailable`. Git observation cannot prove which process made a change.
+
+`create_session(agent_id, *, model, reasoning_effort, tool_policy)` returns a `Session` with `dispatch(prompt)` and `end()`. `list_sessions()` exposes session status. Native turns are serialized per session, and model, effort and policy remain pinned. Codex sessions with a saved native thread ID can enter `suspended` after restart and resume on the next turn. A session whose turn was interrupted is always `interrupted` and requires a new session. Backends without verified resume support also mark sessions `interrupted`. `reap_idle_sessions()` ends idle sessions. `list_agents()` returns static backend capabilities; `agent_info(agent_id)` can retrieve live model and quota data for the built-in backends. `set_preference(agent_id, model=..., reasoning_effort=...)` persists default choices and `get_preference(agent_id)` reads them.
+
+By default, SQLite state lives in `<workspace>/.agent-shuttle/library-tasks.sqlite3`. Supply `database=...` to choose another path or `memory=True` for ephemeral state. An owner lock prevents two managers writing the same database at once. Finished tasks survive restart. Tasks interrupted by process death become failed with `worker_interrupted` and are never executed twice. A2A servers also keep their protocol task store as a projection alongside this library database.
 
 ### `ShuttleClient`
 

@@ -20,7 +20,7 @@ Agent Shuttle is designed as a modular, local-first interoperability layer that 
 |  - A2A JSON-RPC Protocol Routes (/)                         |
 |  - Agent Card Endpoint (/.well-known/agent-card.json)       |
 |  - Read-Only Inspection Endpoints (/bridge/*)               |
-|  - SessionManager (stateful turns, locks, idle reaper)      |
+|  - A2A task projection and library TaskManager              |
 +──────────────┬───────────────┬───────────────┬──────────────+
                |               |               |              |
                v               v               v              v
@@ -97,16 +97,19 @@ Working directories are strictly verified:
 
 ---
 
-## Persistent Sessions (`SessionManager`)
+## Library-Owned Tasks and Sessions (`TaskManager`)
 
-Stateful conversations are governed by `SessionManager` in `agent_bridge/a2a_server.py`:
+`agent_bridge/task_library.py` owns execution, result state, events, and native sessions. Python callers can use it without a server. The A2A executor delegates to it and publishes the same task ID and outcome. The A2A task store remains a protocol projection; the MCP registry stores peer tickets for reconnection.
+
+Stateful conversations are governed by `TaskManager`:
 
 - **Turn Serialization:** Each session has its own `asyncio.Lock`. Concurrent requests targeting the same `session_id` are serialized, guaranteeing that only one turn runs at a time.
-- **Pinned Settings:** The combination of `(model, reasoning_effort, read_only, tool_policy)` is frozen on the first turn. Any attempt to modify these parameters mid-session is rejected.
+- **Pinned Settings:** The combination of `(model, reasoning_effort, tool_policy)` is frozen at session creation. Any attempt to modify these parameters mid-session is rejected.
 - **Idle Reaping:** A background janitor task runs every 60 seconds within Starlette's application lifespan. Sessions that remain idle for more than 1,800 seconds (30 minutes) are automatically closed and their backend processes freed.
 - **Token Usage Deltas:**
   - In Antigravity stream sessions, token usage counters are cumulative. Bridge tracks the previous counter and computes the per-turn delta.
   - In Codex, Bridge extracts `usage.last` to report tokens consumed specifically on that turn.
+- **Crash Recovery:** An unfinished task becomes failed with `worker_interrupted`; it is never replayed. Codex sessions with a saved native thread ID can become `suspended` and resume after restart if no turn was interrupted. All sessions with an interrupted turn, and backends without verified resume support, become `interrupted`.
 
 ---
 

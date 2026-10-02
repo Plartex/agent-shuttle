@@ -296,11 +296,47 @@ class CodexBackend:
             raise
         return _CodexSession(codex, thread)
 
+    async def resume_session(
+        self,
+        native_id: str,
+        model: str | None = None,
+        *,
+        reasoning_effort: str | None = None,
+        read_only: bool = False,
+        tool_policy: str | None = None,
+    ) -> BackendSession:
+        from openai_codex import AsyncCodex, CodexConfig, Sandbox
+
+        sandbox = _codex_sandbox(Sandbox, read_only, tool_policy)
+        codex_home = os.environ.get("CODEX_HOME") or str(Path.home() / ".codex")
+        codex = AsyncCodex(CodexConfig(env={**os.environ, "CODEX_HOME": codex_home}))
+        await codex.__aenter__()
+        try:
+            thread = await codex.thread_resume(
+                native_id,
+                cwd=str(self.workspace),
+                model=model,
+                config=(
+                    {"model_reasoning_effort": reasoning_effort}
+                    if reasoning_effort is not None
+                    else None
+                ),
+                sandbox=sandbox,
+            )
+        except BaseException:
+            await codex.__aexit__(None, None, None)
+            raise
+        return _CodexSession(codex, thread)
+
 
 class _CodexSession:
     def __init__(self, codex, thread):
         self.codex = codex
         self.thread = thread
+
+    @property
+    def native_id(self) -> str:
+        return self.thread.id
 
     async def ask(self, prompt: str, *, on_event=None) -> BackendResponse:
         return await _run_codex_thread(self.thread, prompt, on_event)

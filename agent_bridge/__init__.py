@@ -7,6 +7,7 @@ from .managed import BridgeConnection, HarnessLaunch, connect_harness
 from .profiles import AgentProfile, ToolPolicy
 from .registry import build_profile
 from .task_store import SQLiteTaskStore
+from .task_library import TaskManager, Task, TaskStatus, TaskResult, Session, SessionInfo, AgentInfo
 
 __all__ = [
     "BridgeClient",
@@ -24,4 +25,11 @@ __all__ = [
     "ToolPolicy",
     "build_profile",
     "SQLiteTaskStore",
+    "TaskManager",
+    "Task",
+    "TaskStatus",
+    "TaskResult",
+    "Session",
+    "SessionInfo",
+    "AgentInfo",
 ]

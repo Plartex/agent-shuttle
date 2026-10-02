@@ -178,7 +178,8 @@ Model parameters are passed as A2A metadata keys (`agent_bridge.model`, `agent_b
 - Every server binds to a strictly validated, canonical workspace directory.
 - `connect_harness()` verifies that an existing server's workspace matches the caller's target workspace before reusing it.
 - **Sessions:** `BridgeSession` maintains a stateful conversation across multiple `ask()` calls. Conversation settings (model, effort, tool policy) are pinned at session creation and cannot be changed mid-session. Idle sessions are cleaned up automatically after 30 minutes.
-- **Task lifecycle:** `ShuttleClient.submit()` returns a `TaskHandle` immediately. Use `status()`, bounded `wait(timeout)`, `events()`, `result_page()`, `transcript()`, `result()`, or `cancel()`; reopen a task by ID with `client.task(url, task_id)`. A wait timeout does not stop the agent. An optional UUID `request_id` deduplicates retried submissions. Standalone servers can persist tasks with `--task-db`; MCP task tools do this automatically in the workspace's `.agent-shuttle` directory. Completed results survive restart; interrupted work is marked failed without replay. See the [API reference](docs/api.md#taskhandle-and-bridgeevent).
+- **Library task lifecycle:** `TaskManager` runs agents directly from Python, with no A2A or MCP server. It owns task IDs, sessions, a SQLite event journal, cancellation, result paging, preferences, and interruption recovery. A2A projects the same task ID and result through its protocol; MCP continues to reach those tasks through managed A2A peers. See the [Python API](docs/api.md#taskmanager-library-api).
+- **Remote task lifecycle:** `ShuttleClient.submit()` returns a remote `TaskHandle` immediately. Use `status()`, bounded `wait(timeout)`, `events()`, `result_page()`, `transcript()`, `result()`, or `cancel()`; reopen a task by ID with `client.task(url, task_id)`. A wait timeout does not stop the agent. An optional UUID `request_id` deduplicates retried submissions. Standalone servers can persist tasks with `--task-db`; MCP task tools do this automatically in the workspace's `.agent-shuttle` directory. Completed results survive restart; interrupted work is marked failed without replay. See the [API reference](docs/api.md#taskhandle-and-bridgeevent).
 
 ### Safety & Tool Policies
 Agent Shuttle defines four standardized tool policies:
@@ -188,7 +189,7 @@ Agent Shuttle defines four standardized tool policies:
 - `full_access`: Explicitly unclamps all tool restrictions and approval prompts.
 
 > [!WARNING]
-> `full_access` (or `--agy-dangerously-skip-permissions` for Antigravity) removes all tool approval gates across the entire server for all requests. Never enable this mode on untrusted tasks or expose endpoints beyond loopback. Antigravity CLI does not enforce `read_only` in headless mode and will reject such requests.
+> `full_access` grants the worker unrestricted tool access for that task. `--agy-dangerously-skip-permissions` enables that capability for the Antigravity server. Keep servers on loopback. Antigravity's explicit scoped `read_only` policy is enforced by its verified `PreToolUse` hook; an implicit/default CLI policy does not provide the same guarantee.
 
 ---
 

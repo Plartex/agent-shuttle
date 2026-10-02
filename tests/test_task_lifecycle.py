@@ -57,8 +57,9 @@ class TaskLifecycleTest(unittest.IsolatedAsyncioTestCase):
             port = listener.getsockname()[1]
         self.url = f"http://127.0.0.1:{port}"
         self.backend = SlowBackend()
+        self.app = make_app("slow", self.backend, self.url)
         self.server = uvicorn.Server(uvicorn.Config(
-            make_app("slow", self.backend, self.url),
+            self.app,
             host="127.0.0.1", port=port, log_level="error",
         ))
         self.running = asyncio.create_task(self.server.serve())
@@ -90,6 +91,13 @@ class TaskLifecycleTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(done.state, "TASK_STATE_COMPLETED")
         self.assertEqual(done.text, "done: slow request")
         self.assertEqual((await handle.result()).task_id, handle.task_id)
+
+    async def test_a2a_projects_the_library_owned_task_with_same_id(self):
+        handle = await BridgeClient(timeout_seconds=3).submit(self.url, "shared core")
+        self.backend.release.set()
+        self.assertEqual((await handle.result()).state, "TASK_STATE_COMPLETED")
+        core_task = await self.app.state.task_manager.get(handle.task_id)
+        self.assertEqual((await core_task.result()).text, "done: shared core")
 
     async def test_cancel_stops_running_backend_and_is_observable(self):
         handle = await BridgeClient(timeout_seconds=3).submit(self.url, "cancel me")
